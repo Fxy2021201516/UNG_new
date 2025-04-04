@@ -15,6 +15,7 @@
 #include <iostream>
 #include <boost/program_options.hpp>
 #include <boost/filesystem.hpp>
+#include <filesystem>
 
 #include "utils.h"
 #include "vamana/vamana.h"
@@ -973,4 +974,33 @@ namespace ANNS
       std::cout << "FVECS file: " << output_prefix + FVEC_EXT << "\n";
       std::cout << "TXT file: " << output_prefix + TXT_EXT << "\n";
    }
+
+   // fxy_add:生成多个查询任务
+   void UniNavGraph::generate_multiple_queries(UniNavGraph &index,
+                                               const std::string &base_output_path,
+                                               int num_sets,
+                                               int n_per_set,
+                                               float keep_prob,
+                                               bool stratified_sampling,
+                                               bool verify)
+   {
+      namespace fs = std::filesystem;
+
+      // 确保基础目录存在
+      fs::create_directories(base_output_path);
+
+      for (int i = 1; i <= num_sets; ++i)
+      {
+         std::string folder_name = base_output_path + "/word_query_" + std::to_string(i);
+
+         // 创建目录（包括所有必要的父目录）
+         fs::create_directories(folder_name);
+
+         std::string output_prefix = folder_name + "/words_query"; // 路径在文件夹内
+         index.query_generate(output_prefix, n_per_set, keep_prob, stratified_sampling, verify);
+
+         std::cout << "Generated query set " << i << " at " << folder_name << std::endl;
+      }
+   }
+
 }

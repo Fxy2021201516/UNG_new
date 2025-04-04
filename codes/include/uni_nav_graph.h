@@ -30,10 +30,18 @@ namespace ANNS
 
       // query generator
       void query_generate(std::string &output_prefix, int n, float keep_prob, bool stratified_sampling, bool verify);
+      void generate_multiple_queries(UniNavGraph &index,
+                                     const std::string &base_output_path,
+                                     int num_sets,
+                                     int n_per_set,
+                                     float keep_prob,
+                                     bool stratified_sampling,
+                                     bool verify);
 
    private:
       // data
-      std::shared_ptr<IStorage> _base_storage, _query_storage;
+      std::shared_ptr<IStorage> _base_storage,
+          _query_storage;
       std::shared_ptr<DistanceHandler> _distance_handler;
       std::shared_ptr<Graph> _graph;
       IdxType _num_points;

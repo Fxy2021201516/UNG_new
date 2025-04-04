@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # 定义数据集路径变量
-DATA_DIR="../UNG_data/words" # 将此路径替换为数据集的实际位置
+DATA_DIR="../UNG_data/words" 
+NUM_QUERY_SETS=10 
 
 # 删除 build 文件夹及其所有内容
 if [ -d "build" ]; then
@@ -35,36 +36,78 @@ cd ..
     --generate_query true --query_file_path $DATA_DIR/words/words_query 
 
 # 转换words_query数据格式
-./build/tools/fvecs_to_bin --data_type float --input_file $DATA_DIR/words/words_query.fvecs --output_file $DATA_DIR/words/words_query.bin
+for ((i=1; i<=$NUM_QUERY_SETS; i++))
+do
+    INPUT_FILE="$DATA_DIR/words/words_query/word_query_$i/words_query.fvecs"
+    OUTPUT_FILE="$DATA_DIR/words/words_query/word_query_$i/words_query.bin"
+    
+    echo "Processing set $i: $INPUT_FILE -> $OUTPUT_FILE"
+    ./build/tools/fvecs_to_bin --data_type float --input_file "$INPUT_FILE" --output_file "$OUTPUT_FILE"
+done
 
 # 生成gt
-./build/tools/compute_groundtruth \
-    --data_type float --dist_fn L2 --scenario containment --K 10 --num_threads 32 \
-    --base_bin_file $DATA_DIR/words/words_base.bin --base_label_file $DATA_DIR/words/words_base_labels.txt \
-    --query_bin_file $DATA_DIR/words/words_query.bin --query_label_file $DATA_DIR/words/words_query_labels.txt \
-    --gt_file $DATA_DIR/words/words_gt_labels_containment.bin
+for ((i=1; i<=$NUM_QUERY_SETS; i++))
+do
+    QUERY_DIR="$DATA_DIR/words/words_query/word_query_$i"
+    QUERY_BIN="$QUERY_DIR/words_query.bin"
+    QUERY_LABELS="$QUERY_DIR/words_query_labels.txt"
+    GT_FILE="$QUERY_DIR/words_gt_labels_containment.bin"
+
+    ./build/tools/compute_groundtruth \
+        --data_type float --dist_fn L2 --scenario containment --K 10 --num_threads 32 \
+        --base_bin_file "$DATA_DIR/words/words_base.bin" \
+        --base_label_file "$DATA_DIR/words/words_base_labels.txt" \
+        --query_bin_file "$QUERY_BIN" \
+        --query_label_file "$QUERY_LABELS" \
+        --gt_file "$GT_FILE"
+
+    # 检查是否成功
+    if [ $? -eq 0 ]; then
+        echo "Successfully generated GT for set $i"
+    else
+        echo "Error generating GT for set $i"
+        exit 1
+    fi
+done
+echo -e "\nAll ground truth files generated successfully!"
 
 # 查询 gt_mode: 
 # 0: ground truth is distance and in binary file, 1: ground truth is cost and in csv file, calculate costs, 
 # 2: ground truth is cost and in csv file, read costs
 
-# 定义存储结果的目录
 RESULT_DIR="$DATA_DIR/results"
-# mkdir -p $RESULT_DIR
+mkdir -p "$RESULT_DIR"
 
-for ((i=1; i<=1; i++))
-do
-    echo "Running iteration $i..."
+for ((i=1; i<=$NUM_QUERY_SETS; i++))
+do    
+    echo -e "\nRunning iteration $i with query set $QUERY_DIR..."
+    QUERY_DIR="$DATA_DIR/words/words_query/word_query_$i"
 
-   ./build/apps/search_UNG_index \
-      --data_type float --dist_fn L2 --num_threads 16 --K 10 \
-      --base_bin_file $DATA_DIR/words/words_base.bin --base_label_file $DATA_DIR/words/words_base_labels.txt \
-      --query_bin_file $DATA_DIR/words/words_query.bin --query_label_file $DATA_DIR/words/words_query_labels.txt \
-      --gt_file $DATA_DIR/words/words_gt_labels_containment.bin \
-      --index_path_prefix $DATA_DIR/index_files/UNG/words_base_labels_general_cross6_R32_L100_A1.2/ \
-      --result_path_prefix $RESULT_DIR/UNG/words_base_labels_containment_cross6_R32_L100_A1.2/ \
-      --scenario containment --num_entry_points 16 --Lsearch 10 50 300 500 1000 1200 3000 3500 4000
+    # 创建当前查询集的结果目录
+    CURRENT_RESULT_DIR="$RESULT_DIR/word_query_$i"
+    mkdir -p "$CURRENT_RESULT_DIR"
 
-    echo "Iteration $i"
+    ./build/apps/search_UNG_index \
+        --data_type float --dist_fn L2 --num_threads 16 --K 10 \
+        --base_bin_file "$DATA_DIR/words/words_base.bin" \
+        --base_label_file "$DATA_DIR/words/words_base_labels.txt" \
+        --query_bin_file "$QUERY_DIR/words_query.bin" \
+        --query_label_file "$QUERY_DIR/words_query_labels.txt" \
+        --gt_file "$QUERY_DIR/words_gt_labels_containment.bin" \
+        --index_path_prefix "$DATA_DIR/index_files/UNG/words_base_labels_general_cross6_R32_L100_A1.2/" \
+        --result_path_prefix "$CURRENT_RESULT_DIR/words_" \
+        --scenario containment \
+        --num_entry_points 16 \
+        --Lsearch 10 50 300 500 1000 1200 3000 3500 4000
+
+    # 检查执行状态
+    if [ $? -eq 0 ]; then
+        echo "Successfully completed iteration $i"
+    else
+        echo "Error in iteration $i"
+        exit 1
+    fi
 done
+
+echo -e "\nAll search iterations completed successfully!"
 
