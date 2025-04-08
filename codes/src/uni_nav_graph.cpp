@@ -711,6 +711,7 @@ namespace ANNS
       auto start_time = std::chrono::high_resolution_clock::now();
 
       // save meta data
+      std::cout << "Saving meta data ..." << std::endl;
       std::map<std::string, std::string> meta_data;
       statistics();
       meta_data["num_points"] = std::to_string(_num_points);
@@ -732,35 +733,51 @@ namespace ANNS
       meta_data["index_size(MB)"] = std::to_string(_index_size);
       std::string meta_filename = index_path_prefix + "meta";
       write_kv_file(meta_filename, meta_data);
+      std::cout << "Meta data saved in " << meta_filename << std::endl;
 
       // save vectors and label sets
+      std::cout << "Saving vectors and label sets ..." << std::endl;
       std::string bin_file = index_path_prefix + "vecs.bin";
       std::string label_file = index_path_prefix + "labels.txt";
       _base_storage->write_to_file(bin_file, label_file);
+      std::cout << "vecs.bin saved in " << bin_file << std::endl;
 
       // save group id to label set
+      std::cout << "Saving group_id_to_label_set ..." << std::endl;
       std::string group_id_to_label_set_filename = index_path_prefix + "group_id_to_label_set";
+      std::cout << "size: " << _group_id_to_label_set.size() << std::endl;
+      std::cout << "group_id_to_label_set_filename: " << group_id_to_label_set_filename << std::endl;
       write_2d_vectors(group_id_to_label_set_filename, _group_id_to_label_set);
 
       // save group id to range
+      std::cout << "Saving group_id_to_range ..." << std::endl;
       std::string group_id_to_range_filename = index_path_prefix + "group_id_to_range";
       write_2d_vectors(group_id_to_range_filename, _group_id_to_range);
+      std::cout << "group_id_to_range_filename: " << group_id_to_range_filename << std::endl;
 
       // save group id to entry point
+      std::cout << "Saving group_entry_points ..." << std::endl;
       std::string group_entry_points_filename = index_path_prefix + "group_entry_points";
       write_1d_vector(group_entry_points_filename, _group_entry_points);
+      std::cout << "group_entry_points_filename: " << group_entry_points_filename << std::endl;
 
       // save new to old vec ids
+      std::cout << "Saving new_to_old_vec_ids ..." << std::endl;
       std::string new_to_old_vec_ids_filename = index_path_prefix + "new_to_old_vec_ids";
       write_1d_vector(new_to_old_vec_ids_filename, _new_to_old_vec_ids);
+      std::cout << "new_to_old_vec_ids_filename: " << new_to_old_vec_ids_filename << std::endl;
 
       // save trie index
+      std::cout << "Saving trie index ..." << std::endl;
       std::string trie_filename = index_path_prefix + "trie";
       _trie_index.save(trie_filename);
+      std::cout << "trie_filename: " << trie_filename << std::endl;
 
       // save graph data
+      std::cout << "Saving graph data ..." << std::endl;
       std::string graph_filename = index_path_prefix + "graph";
       _graph->save(graph_filename);
+      std::cout << "graph_filename: " << graph_filename << std::endl;
 
       // print
       std::cout << "- Index saved in " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start_time).count() << " ms" << std::endl;
@@ -848,7 +865,6 @@ namespace ANNS
       uint32_t dim = _base_storage->get_dim();
       std::cout << "Vector dimension: " << dim << std::endl;
       std::cout << "Number of points: " << _num_points << std::endl;
-      // fvec_file.write((char *)&dim, sizeof(uint32_t));
 
       // 随机数生成器
       std::random_device rd;
@@ -858,8 +874,11 @@ namespace ANNS
       std::vector<QueryTask> all_queries;
       size_t total_queries = 0;
 
-      for (ANNS::IdxType group_id = 1; group_id <= _num_groups; ++group_id)
+      // min(7000个查询,_num_groups)
+      total_queries = std::min(7000, int(_num_groups));
+      for (ANNS::IdxType group_id = 1; group_id <= total_queries; ++group_id)
       {
+         // std::cout << "group_id: " << group_id << std::endl;
          auto [start, end] = _group_id_to_range[group_id];
          size_t group_size = end - start;
          if (group_size == 0)
@@ -881,6 +900,10 @@ namespace ANNS
          for (int i = 0; i < sample_num; ++i) // 每个组采样的个数
          {
             ANNS::IdxType vec_id = vec_ids[i];
+            if (_base_storage->get_label_set(vec_id).empty())
+            {
+               continue; // 跳过无 base 属性的向量
+            }
             QueryTask task;
             task.vec_id = vec_id;
 
@@ -976,14 +999,17 @@ namespace ANNS
    }
 
    // fxy_add:生成多个查询任务
-   void UniNavGraph::generate_multiple_queries(UniNavGraph &index,
-                                               const std::string &base_output_path,
-                                               int num_sets,
-                                               int n_per_set,
-                                               float keep_prob,
-                                               bool stratified_sampling,
-                                               bool verify)
+   void UniNavGraph::generate_multiple_queries(
+       std::string dataset,
+       UniNavGraph &index,
+       const std::string &base_output_path,
+       int num_sets,
+       int n_per_set,
+       float keep_prob,
+       bool stratified_sampling,
+       bool verify)
    {
+      std::cout << "enter generate_multiple_queries" << std::endl;
       namespace fs = std::filesystem;
 
       // 确保基础目录存在
@@ -991,12 +1017,13 @@ namespace ANNS
 
       for (int i = 1; i <= num_sets; ++i)
       {
-         std::string folder_name = base_output_path + "/word_query_" + std::to_string(i);
+         std::cout << "Generating query set " << i << "..." << std::endl;
+         std::string folder_name = base_output_path + "/" + dataset + "_query_" + std::to_string(i);
 
          // 创建目录（包括所有必要的父目录）
          fs::create_directories(folder_name);
 
-         std::string output_prefix = folder_name + "/words_query"; // 路径在文件夹内
+         std::string output_prefix = folder_name + "/" + dataset + "_query"; // 路径在文件夹内
          index.query_generate(output_prefix, n_per_set, keep_prob, stratified_sampling, verify);
 
          std::cout << "Generated query set " << i << " at " << folder_name << std::endl;

@@ -30,7 +30,8 @@ namespace ANNS
 
       // query generator
       void query_generate(std::string &output_prefix, int n, float keep_prob, bool stratified_sampling, bool verify);
-      void generate_multiple_queries(UniNavGraph &index,
+      void generate_multiple_queries(std::string dataset,
+                                     UniNavGraph &index,
                                      const std::string &base_output_path,
                                      int num_sets,
                                      int n_per_set,

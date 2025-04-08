@@ -22,6 +22,7 @@ int main(int argc, char **argv)
    // if query file is not provided, generate query file
    bool generate_query;
    std::string query_file_path;
+   std::string dataset;
 
    try
    {
@@ -61,6 +62,8 @@ int main(int argc, char **argv)
                          "Whether to generate query file");
       desc.add_options()("query_file_path", po::value<std::string>(&query_file_path)->default_value("my_words_query"),
                          "Query label file");
+      desc.add_options()("dataset", po::value<std::string>(&dataset)->required(),
+                         "dataset");
 
       po::variables_map vm;
       po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -101,10 +104,13 @@ int main(int argc, char **argv)
    // save index
    index.save(index_path_prefix);
 
-   // 生成查询标签和查询向量：(文件名，每个group中有几个查询向量, 每个属性的概率, 是否分层抽样, 是否验证是子集)
-   // std::cout << "Generating query labels and query vectors ..." << std::endl;
-   // index.query_generate(query_file_path, 1, 0.5f, false, true);
-   // std::cout << "Query generation completed. Output saved to " << query_file_path << std::endl;
-   index.generate_multiple_queries(index, query_file_path, 10, 1, 0.5f, false, true);
+   if (generate_query)
+   {
+      // 生成查询标签和查询向量：(文件名，每个group中有几个查询向量, 每个属性的概率, 是否分层抽样, 是否验证是子集)
+      std::cout << "Generating query file ..." << std::endl;
+      std::cout << "Query file path: " << query_file_path << std::endl;
+      index.generate_multiple_queries(dataset, index, query_file_path, 10, 1, 0.5f, false, true);
+   }
+
    return 0;
 }
