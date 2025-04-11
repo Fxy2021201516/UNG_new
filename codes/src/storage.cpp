@@ -145,25 +145,14 @@ namespace ANNS
    template <typename T>
    void Storage<T>::write_to_file(const std::string &bin_file, const std::string &label_file)
    {
-      std::cout << "enter write_to_file" << std::endl;
-
-      // write vector data
-      std::cout << "write vector data" << std::endl;
-      std::cout << "num_points: " << num_points << std::endl;
-      std::cout << "dim: " << dim << std::endl;
       std::ofstream file(bin_file, std::ios::binary);
       file.write((char *)&num_points, sizeof(IdxType));
       file.write((char *)&dim, sizeof(IdxType));
       file.write((char *)vecs, num_points * dim * sizeof(T));
       file.close();
-      std::cout << "write vector data done" << std::endl;
 
       // write label data
-      std::cout << "write label data" << std::endl;
-      std::cout << "num_points: " << num_points << std::endl;
-      std::cout << "label_sets size: " << label_sets[0].size() << std::endl;
       file.open(label_file);
-      std::cout << "open label file" << std::endl;
       if (!file.is_open())
       {
          std::cerr << "Error: failed to open file " << label_file << std::endl;
@@ -171,16 +160,10 @@ namespace ANNS
       }
       for (auto i = 0; i < num_points; ++i)
       {
-         std::cout << "label_sets[" << i << "] size: " << label_sets[i].size() << std::endl;
          int size = label_sets[i].size();
          if (size == 0) // 检查是否为空
          {
             continue;
-         }
-         std::cout << "label_sets[" << i << "]: ";
-         for (auto j = 0; j < size; ++j)
-         {
-            std::cout << label_sets[i][j] << " ";
          }
          file << label_sets[i][0];
          for (auto j = 1; j < size; ++j)
@@ -188,7 +171,6 @@ namespace ANNS
          file << std::endl;
       }
       file.close();
-      std::cout << "write label data done" << std::endl;
    }
 
    // reorder the vector data

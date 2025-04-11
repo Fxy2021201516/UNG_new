@@ -4,6 +4,7 @@
 #include <unordered_set>
 #include <boost/filesystem.hpp>
 #include <vector>
+#include <queue>
 
 #include <random>
 #include <fstream>
@@ -55,11 +56,11 @@ namespace ANNS
       _num_threads = num_threads;
       _scenario = scenario;
 
-      // build the trie tree index to divide groups
       std::cout << "Dividing groups and building the trie tree index ..." << std::endl;
       auto start_time = std::chrono::high_resolution_clock::now();
       build_trie_and_divide_groups();
       _graph = std::make_shared<ANNS::Graph>(base_storage->get_num_points());
+      _global_graph = std::make_shared<ANNS::Graph>(base_storage->get_num_points());
       prepare_group_storages_graphs();
       _label_processing_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::high_resolution_clock::now() - start_time)
@@ -68,6 +69,7 @@ namespace ANNS
 
       // build graph index for each group
       build_graph_for_all_groups();
+      build_global_vamana_graph();
 
       // for label equality scenario, there is no need for label navigating graph and cross-group edges
       if (_scenario == "equality")
@@ -79,6 +81,9 @@ namespace ANNS
 
          // build the label navigating graph
          build_label_nav_graph();
+
+         // calculate the coverage ratio
+         cal_f_coverage_ratio();
 
          // build cross-group edges
          build_cross_group_edges();
@@ -100,7 +105,7 @@ namespace ANNS
          const auto &label_set = _base_storage->get_label_set(vec_id);
          auto group_id = _trie_index.insert(label_set, new_group_id);
 
-         // deal with new label set
+         // deal with new label setinver
          if (group_id + 1 > _group_id_to_vec_ids.size())
          {
             _group_id_to_vec_ids.resize(group_id + 1);
@@ -256,6 +261,24 @@ namespace ANNS
       std::cout << "\r- Finished in " << _build_graph_time << " ms" << std::endl;
    }
 
+   // fxy_add：构建全局Vamana图
+   void UniNavGraph::build_global_vamana_graph()
+   {
+      std::cout << "Building global Vamana graph..." << std::endl;
+      auto start_time = std::chrono::high_resolution_clock::now();
+
+      _global_vamana = std::make_shared<Vamana>(false);
+
+      _global_vamana->build(_base_storage, _distance_handler, _global_graph, _max_degree, _Lbuild, _alpha, 1);
+
+      auto build_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::high_resolution_clock::now() - start_time)
+                            .count();
+      _global_vamana_entry_point = _global_vamana->get_entry_point();
+
+      std::cout << "- Global Vamana graph built in " << build_time << " ms" << std::endl;
+   }
+
    void UniNavGraph::build_complete_graph(std::shared_ptr<Graph> graph, IdxType num_points)
    {
       for (auto i = 0; i < num_points; ++i)
@@ -264,33 +287,155 @@ namespace ANNS
                graph->neighbors[i].emplace_back(j);
    }
 
-   //  void UniNavGraph::build_label_nav_graph() {
-   //      std::cout << "Building label navigation graph... " << std::endl;
-   //      auto start_time = std::chrono::high_resolution_clock::now();
-   //      _label_nav_graph = std::make_shared<LabelNavGraph>(_num_groups+1);
-   //      omp_set_num_threads(_num_threads);
+   // fxy_add: 递归打印孩子节点及其覆盖率
+   void print_children_recursive(const std::shared_ptr<ANNS::LabelNavGraph> graph, IdxType group_id, std::ofstream &outfile, int indent_level)
+   {
+      // 根据缩进级别生成前缀空格
+      std::string indent(indent_level * 4, ' '); // 每一层缩进4个空格
 
-   //      // obtain out-neighbors
-   //      #pragma omp parallel for schedule(dynamic, 256)
-   //      for (auto group_id=1; group_id<=_num_groups; ++group_id) {
-   //          if (group_id % 100 == 0)
-   //              std::cout << "\r" << (100.0 * group_id) / _num_groups << "%" << std::flush;
-   //          std::vector<IdxType> min_super_set_ids;
-   //          get_min_super_sets(_group_id_to_label_set[group_id], min_super_set_ids, true);
-   //          _label_nav_graph->out_neighbors[group_id] = min_super_set_ids;
-   //      }
+      // 打印当前节点
+      outfile << "\n"
+              << indent << "[" << group_id << "] (" << graph->coverage_ratio[group_id] << ")";
 
-   //      // obtain in-neighbors
-   //      for (auto group_id=1; group_id<=_num_groups; ++group_id)
-   //          for (auto each : _label_nav_graph->out_neighbors[group_id])
-   //              _label_nav_graph->in_neighbors[each].emplace_back(group_id);
+      // 如果有子节点，递归打印子节点
+      if (!graph->out_neighbors[group_id].empty())
+      {
+         for (size_t i = 0; i < graph->out_neighbors[group_id].size(); ++i)
+         {
+            auto child_group_id = graph->out_neighbors[group_id][i];
+            print_children_recursive(graph, child_group_id, outfile, indent_level + 1); // 增加缩进级别
+         }
+      }
+   }
 
-   //      _build_LNG_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-   //                        std::chrono::high_resolution_clock::now() - start_time).count();
-   //      std::cout << "\r- Finished in " << _build_LNG_time << " ms" << std::endl;
-   //  }
+   // fxy_add: 输出覆盖率及孩子节点,调用print_children_recursive
+   void output_coverage_ratio(const std::shared_ptr<ANNS::LabelNavGraph> _label_nav_graph, IdxType _num_groups, std::ofstream &outfile)
+   {
+      outfile << "Coverage Ratio for each group\n";
+      outfile << "=====================================\n";
+      outfile << "Format: [GroupID] -> CoverageRatio \n";
+      outfile << "-> [child_GroupID (CoverageRatio)]\n\n";
 
-   // fxy_add: 打印信息的build_label_nav_graph
+      for (IdxType group_id = 1; group_id <= _num_groups; ++group_id)
+      {
+         // 打印当前组的覆盖率
+         outfile << "[" << group_id << "] -> " << _label_nav_graph->coverage_ratio[group_id];
+
+         // 打印孩子节点
+         if (!_label_nav_graph->out_neighbors[group_id].empty())
+         {
+            outfile << " ->";
+            for (size_t i = 0; i < _label_nav_graph->out_neighbors[group_id].size(); ++i)
+            {
+               auto child_group_id = _label_nav_graph->out_neighbors[group_id][i];
+               print_children_recursive(_label_nav_graph, child_group_id, outfile, 1); // 第一层子节点缩进为1
+            }
+         }
+         outfile << "\n";
+      }
+   }
+
+   // fxy_add：计算每个label set的向量覆盖比率
+   void UniNavGraph::cal_f_coverage_ratio()
+   {
+      // step1：初始化，计算每个label set的向量覆盖比率(有且仅有)
+      std::cout << "Calculating coverage ratio..." << std::endl;
+      auto start_time = std::chrono::high_resolution_clock::now();
+      _label_nav_graph->coverage_ratio.resize(_num_groups + 1, 0.0);
+      for (IdxType group_id = 1; group_id <= _num_groups; ++group_id)
+      {
+         const auto &label_set = _group_id_to_label_set[group_id];
+         if (label_set.empty())
+            continue;
+
+         double coverage_ratio = static_cast<double>(_group_id_to_vec_ids[group_id].size()) / _num_points;
+         _label_nav_graph->coverage_ratio[group_id] = coverage_ratio;
+      }
+
+      // step2：检查出度为0的group并压入队列
+      std::queue<IdxType> q;
+      for (IdxType group_id = 1; group_id <= _num_groups; ++group_id)
+      {
+         if (_label_nav_graph->out_neighbors[group_id].empty())
+         {
+            q.push(group_id);
+         }
+      }
+      std::cout << "- Number of leaf nodes: " << q.size() << std::endl;
+
+      // step3：从队列中取出group，更新其父节点的覆盖比率
+      while (!q.empty())
+      {
+         IdxType current = q.front();
+         q.pop();
+
+         // 更新父节点的覆盖比率
+         for (auto parent : _label_nav_graph->in_neighbors[current])
+         {
+            _label_nav_graph->coverage_ratio[parent] += _label_nav_graph->coverage_ratio[current];
+            _label_nav_graph->out_degree[parent] -= 1;
+            if (_label_nav_graph->out_degree[parent] == 0)
+            {
+               q.push(parent);
+            }
+         }
+      }
+
+      // 时间
+      auto _coverage_ratio_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::high_resolution_clock::now() - start_time)
+                                      .count();
+
+      std::cout << "- Coverage ratio calculated in " << _coverage_ratio_time << " ms" << std::endl;
+
+      // step4：递归存储所有孩子的覆盖比率
+      std::ofstream outfile0("LNG_coverage_ratio.txt");
+      output_coverage_ratio(_label_nav_graph, _num_groups, outfile0);
+      outfile0.close();
+
+      // step5：存储每个group的覆盖比率和标签集 Format: GroupID CoverageRatio LabelSet
+      std::ofstream outfile("group_coverage_ratio.txt");
+      for (IdxType group_id = 1; group_id <= _num_groups; ++group_id)
+      {
+         outfile << group_id << " " << _label_nav_graph->coverage_ratio[group_id] << " ";
+         for (const auto &label : _group_id_to_label_set[group_id])
+            outfile << label << " ";
+         outfile << "\n";
+      }
+
+      // step6：存储每个group里面有几个向量 Format: GroupID NumVectors
+      std::ofstream outfile1("group_num_vectors.txt");
+      for (IdxType group_id = 1; group_id <= _num_groups; ++group_id)
+         outfile1 << group_id << " " << _group_id_to_vec_ids[group_id].size() << "\n";
+   }
+
+   /*void UniNavGraph::build_label_nav_graph() {
+       std::cout << "Building label navigation graph... " << std::endl;
+       auto start_time = std::chrono::high_resolution_clock::now();
+       _label_nav_graph = std::make_shared<LabelNavGraph>(_num_groups+1);
+       omp_set_num_threads(_num_threads);
+
+       // obtain out-neighbors
+       #pragma omp parallel for schedule(dynamic, 256)
+       for (auto group_id=1; group_id<=_num_groups; ++group_id) {
+           if (group_id % 100 == 0)
+               std::cout << "\r" << (100.0 * group_id) / _num_groups << "%" << std::flush;
+           std::vector<IdxType> min_super_set_ids;
+           get_min_super_sets(_group_id_to_label_set[group_id], min_super_set_ids, true);
+           _label_nav_graph->out_neighbors[group_id] = min_super_set_ids;
+       }
+
+       // obtain in-neighbors
+       for (auto group_id=1; group_id<=_num_groups; ++group_id)
+           for (auto each : _label_nav_graph->out_neighbors[group_id])
+               _label_nav_graph->in_neighbors[each].emplace_back(group_id);
+
+       _build_LNG_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::high_resolution_clock::now() - start_time).count();
+       std::cout << "\r- Finished in " << _build_LNG_time << " ms" << std::endl;
+   }*/
+
+   // fxy_add : 打印信息的build_label_nav_graph
    void UniNavGraph::build_label_nav_graph()
    {
       std::cout << "Building label navigation graph... " << std::endl;
@@ -298,7 +443,6 @@ namespace ANNS
       _label_nav_graph = std::make_shared<LabelNavGraph>(_num_groups + 1);
       omp_set_num_threads(_num_threads);
 
-      // 打开输出文件
       std::ofstream outfile("lng_structure.txt");
       if (!outfile.is_open())
       {
@@ -322,16 +466,14 @@ namespace ANNS
          std::vector<IdxType> min_super_set_ids;
          get_min_super_sets(_group_id_to_label_set[group_id], min_super_set_ids, true);
          _label_nav_graph->out_neighbors[group_id] = min_super_set_ids;
+         _label_nav_graph->out_degree[group_id] = min_super_set_ids.size();
 
-// 写入文件（需要加锁保证线程安全）
 #pragma omp critical
          {
             outfile << "[" << group_id << "] {";
             // 打印标签集
             for (const auto &label : _group_id_to_label_set[group_id])
-            {
                outfile << label << ",";
-            }
             outfile << "} -> ";
 
             // 打印出边（包含目标节点的标签集）
@@ -358,10 +500,11 @@ namespace ANNS
          for (auto each : _label_nav_graph->out_neighbors[group_id])
          {
             _label_nav_graph->in_neighbors[each].emplace_back(group_id);
+            _label_nav_graph->in_degree[group_id] += 1;
          }
       }
 
-      outfile.close();
+      // outfile.close();
       _build_LNG_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::high_resolution_clock::now() - start_time)
                             .count();
@@ -369,6 +512,7 @@ namespace ANNS
       std::cout << "- LNG structure saved to lng_structure.txt" << std::endl;
    }
 
+   // 将分组内的局部索引转换为全局索引
    void UniNavGraph::add_offset_for_uni_nav_graph()
    {
       omp_set_num_threads(_num_threads);
@@ -778,6 +922,16 @@ namespace ANNS
       std::string graph_filename = index_path_prefix + "graph";
       _graph->save(graph_filename);
       std::cout << "graph_filename: " << graph_filename << std::endl;
+
+      std::cout << "Saving global graph data..." << std::endl;
+      std::string global_graph_filename = index_path_prefix + "global_graph";
+      _global_graph->save(global_graph_filename);
+      std::cout << "global_graph_filename: " << global_graph_filename << std::endl;
+
+      std::cout << "Saving global_vamana_entry_point..." << std::endl;
+      std::string global_vamana_entry_point_filename = index_path_prefix + "global_vamana_entry_point";
+      write_one_T(global_vamana_entry_point_filename, _global_vamana_entry_point);
+      std::cout << "global_vamana_entry_point_filename: " << global_vamana_entry_point_filename << std::endl;
 
       // print
       std::cout << "- Index saved in " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start_time).count() << " ms" << std::endl;

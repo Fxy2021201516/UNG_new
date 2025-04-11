@@ -59,6 +59,7 @@ namespace ANNS
       std::shared_ptr<LabelNavGraph> _label_nav_graph = nullptr;
       void get_min_super_sets(const std::vector<LabelType> &query_label_set, std::vector<IdxType> &min_super_set_ids,
                               bool avoid_self = false, bool need_containment = true);
+      void cal_f_coverage_ratio();
       void build_label_nav_graph();
 
       // prepare vector storage for each group
@@ -74,6 +75,11 @@ namespace ANNS
       void build_graph_for_all_groups();
       void build_complete_graph(std::shared_ptr<Graph> graph, IdxType num_points);
       std::vector<std::shared_ptr<Vamana>> _vamana_instances;
+
+      std::shared_ptr<Graph> _global_graph;
+      std::shared_ptr<Vamana> _global_vamana; // 全局 Vamana 实例
+      IdxType _global_vamana_entry_point;     // 全局 Vamana 实例的入口点
+      void build_global_vamana_graph();
 
       // index parameters for each graph
       IdxType _max_degree, _Lbuild;

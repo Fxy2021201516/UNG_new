@@ -34,6 +34,21 @@ namespace ANNS
                                  uint32_t K,
                                  const std::string &output_file);
 
+   // write 1个字符
+   template <typename T>
+   void write_one_T(const std::string &filename, const T &value)
+   {
+      std::ofstream out(filename);
+      out << value << std::endl;
+   }
+   // load 1个字符
+   template <typename T>
+   void load_one_T(const std::string &filename, T &value)
+   {
+      std::ifstream in(filename);
+      in >> value;
+   }
+
    // write 1D-std::vector
    template <typename T>
    void write_1d_vector(const std::string &filename, const std::vector<T> &vec)
