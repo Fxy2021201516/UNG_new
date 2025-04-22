@@ -104,6 +104,11 @@ int main(int argc, char **argv)
    // save index
    index.save(index_path_prefix);
 
+   // 测试读取向量-属性二分图的函数
+   // ANNS::UniNavGraph index2;
+   // index2.load_bipartite_graph(index_path_prefix + "vector_attr_graph");
+   // index2.compare_graphs(index, index2);
+
    if (generate_query)
    {
       // 生成查询标签和查询向量：(文件名，每个group中有几个查询向量, 每个属性的概率, 是否分层抽样, 是否验证是子集)

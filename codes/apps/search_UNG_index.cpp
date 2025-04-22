@@ -17,6 +17,7 @@ int main(int argc, char **argv)
    ANNS::IdxType K, num_entry_points;
    std::vector<ANNS::IdxType> Lsearch_list;
    uint32_t num_threads;
+   bool ung_or_diskann = false; // true: ung, false: diskann
 
    try
    {
@@ -52,6 +53,8 @@ int main(int argc, char **argv)
                          "Number of entry points in each entry group");
       desc.add_options()("Lsearch", po::value<std::vector<ANNS::IdxType>>(&Lsearch_list)->multitoken()->required(),
                          "Number of candidates to search in the graph");
+      desc.add_options()("ung_or_diskann", po::value<bool>(&ung_or_diskann)->required(),
+                         "ung_or_diskann");
 
       po::variables_map vm;
       po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -80,8 +83,9 @@ int main(int argc, char **argv)
    query_storage->load_from_file(query_bin_file, query_label_file);
 
    // load index
-   ANNS::UniNavGraph index;
+   ANNS::UniNavGraph index(query_storage->get_num_points());
    index.load(index_path_prefix, data_type);
+   index.load_bipartite_graph(index_path_prefix + "vector_attr_graph");
 
    // preparation
    auto num_queries = query_storage->get_num_points();
@@ -90,6 +94,17 @@ int main(int argc, char **argv)
    ANNS::load_gt_file(gt_file, gt, num_queries, K);
    auto results = new std::pair<ANNS::IdxType, float>[num_queries * K];
 
+   // compute attribute bitmap
+   std::cout << "Start computing attribute bitmap ..." << std::endl;
+   auto start_time_bitmap = std::chrono::high_resolution_clock::now();
+   std::vector<std::vector<bool>> bitmap(num_queries);
+#pragma omp parallel for
+   for (int id = 0; id < num_queries; id++)
+   {
+      bitmap[id] = index.compute_attribute_bitmap(query_storage->get_label_set(id));
+   }
+   std::cout << "- Bitmap time cost: " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start_time_bitmap).count() << "ms" << std::endl;
+
    // search
    std::vector<float> all_cmps, all_qpss, all_recalls;
    std::cout << "Start querying ..." << std::endl;
@@ -97,7 +112,10 @@ int main(int argc, char **argv)
    {
       auto start_time = std::chrono::high_resolution_clock::now();
       std::vector<float> num_cmps(num_queries);
-      index.search(query_storage, distance_handler, num_threads, Lsearch, num_entry_points, scenario, K, results, num_cmps);
+      if (ung_or_diskann)
+         index.search(query_storage, distance_handler, num_threads, Lsearch, num_entry_points, scenario, K, results, num_cmps, bitmap);
+      else
+         index.search_hybrid(query_storage, distance_handler, num_threads, Lsearch, num_entry_points, scenario, K, results, num_cmps, bitmap);
       auto time_cost = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start_time).count();
 
       // statistics

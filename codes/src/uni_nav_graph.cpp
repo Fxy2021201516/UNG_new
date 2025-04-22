@@ -17,6 +17,7 @@
 #include <boost/program_options.hpp>
 #include <boost/filesystem.hpp>
 #include <filesystem>
+#include <bitset>
 
 #include "utils.h"
 #include "vamana/vamana.h"
@@ -70,6 +71,7 @@ namespace ANNS
       // build graph index for each group
       build_graph_for_all_groups();
       build_global_vamana_graph();
+      build_vector_and_attr_graph();
 
       // for label equality scenario, there is no need for label navigating graph and cross-group edges
       if (_scenario == "equality")
@@ -278,7 +280,422 @@ namespace ANNS
 
       std::cout << "- Global Vamana graph built in " << build_time << " ms" << std::endl;
    }
+   //=====================================begin 数据预处理：构建向量-属性二分图=========================================
+   // fxy_add: 构建向量-属性二分图
+   void UniNavGraph::build_vector_and_attr_graph()
+   {
+      std::cout << "Building vector-attribute bipartite graph..." << std::endl;
+      auto start_time = std::chrono::high_resolution_clock::now();
 
+      // 初始化属性到ID的映射和反向映射
+      _attr_to_id.clear();
+      _id_to_attr.clear();
+      _vector_attr_graph.clear();
+
+      // 第一遍：收集所有唯一属性并分配ID
+      AtrType attr_id = 0;
+      for (IdxType vec_id = 0; vec_id < _num_points; ++vec_id)
+      {
+         const auto &label_set = _base_storage->get_label_set(vec_id);
+         for (const auto &label : label_set)
+         {
+            if (_attr_to_id.find(label) == _attr_to_id.end())
+            {
+               _attr_to_id[label] = attr_id;
+               _id_to_attr[attr_id] = label;
+               attr_id++;
+            }
+         }
+      }
+
+      // 初始化图结构（向量节点 + 属性节点）
+      _vector_attr_graph.resize(_num_points + static_cast<size_t>(attr_id));
+
+      // 第二遍：构建图结构
+      for (IdxType vec_id = 0; vec_id < _num_points; ++vec_id)
+      {
+         const auto &label_set = _base_storage->get_label_set(vec_id);
+         for (const auto &label : label_set)
+         {
+            AtrType a_id = _attr_to_id[label];
+
+            // 添加双向边
+            // 向量节点ID范围: [0, _num_points-1]
+            // 属性节点ID范围: [_num_points, _num_points+attr_id-1]
+            _vector_attr_graph[vec_id].push_back(_num_points + static_cast<IdxType>(a_id));
+            _vector_attr_graph[_num_points + static_cast<IdxType>(a_id)].push_back(vec_id);
+         }
+      }
+
+      // 统计信息
+      _num_attributes = attr_id;
+      auto build_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::high_resolution_clock::now() - start_time)
+                            .count();
+      std::cout << "- Built bipartite graph with " << _num_points << " vectors and "
+                << _num_attributes << " attributes in " << build_time << " ms" << std::endl;
+      std::cout << "- Total edges: " << count_graph_edges() << std::endl;
+
+      // 可选：保存图结构供调试
+      save_bipartite_graph_info();
+   }
+
+   // fxy_add: 计算向量-属性二分图的边数
+   size_t UniNavGraph::count_graph_edges() const
+   {
+      size_t total_edges = 0;
+      for (const auto &neighbors : _vector_attr_graph)
+      {
+         total_edges += neighbors.size();
+      }
+      return total_edges / 2; // 因为是双向边，实际边数是总数的一半
+   }
+
+   // fxy_add: 保存二分图信息到txt文件调试用
+   void UniNavGraph::save_bipartite_graph_info() const
+   {
+      std::ofstream outfile("bipartite_graph_info.txt");
+      if (!outfile.is_open())
+      {
+         std::cerr << "Warning: Could not open file to save bipartite graph info" << std::endl;
+         return;
+      }
+
+      outfile << "Bipartite Graph Information\n";
+      outfile << "==========================\n";
+      outfile << "Total vectors: " << _num_points << "\n";
+      outfile << "Total attributes: " << _num_attributes << "\n";
+      outfile << "Total edges: " << count_graph_edges() << "\n\n";
+
+      // 输出属性映射
+      outfile << "Attribute to ID Mapping:\n";
+      for (const auto &pair : _attr_to_id)
+      {
+         outfile << pair.first << " -> " << static_cast<IdxType>(pair.second) << "\n";
+      }
+      outfile << "\n";
+
+      // 输出部分图结构示例
+      outfile << "Sample Graph Connections (first 10 vectors and attributes):\n";
+      outfile << "Vector connections:\n";
+      for (IdxType i = 0; i < std::min(_num_points, static_cast<IdxType>(10)); ++i)
+      {
+         outfile << "Vector " << i << " connects to attributes: ";
+         for (auto a_node : _vector_attr_graph[i])
+         {
+            AtrType attr_id = static_cast<AtrType>(a_node - _num_points);
+            outfile << _id_to_attr.at(attr_id) << " ";
+         }
+         outfile << "\n";
+      }
+
+      outfile << "\nAttribute connections:\n";
+      for (AtrType i = 0; i < std::min(_num_attributes, static_cast<AtrType>(5)); ++i)
+      {
+         outfile << "Attribute " << _id_to_attr.at(i) << " connects to vectors: ";
+         for (auto v_node : _vector_attr_graph[_num_points + static_cast<IdxType>(i)])
+         {
+            outfile << v_node << " ";
+         }
+         outfile << "\n";
+      }
+
+      outfile.close();
+      std::cout << "- Bipartite graph info saved to bipartite_graph_info.txt" << std::endl;
+   }
+
+   uint32_t UniNavGraph::compute_checksum() const
+   {
+      // 简单的校验和计算示例
+      uint32_t sum = 0;
+      for (const auto &neighbors : _vector_attr_graph)
+      {
+         for (IdxType node : neighbors)
+         {
+            sum ^= (node << (sum % 32));
+         }
+      }
+      return sum;
+   }
+
+   // fxy_add: 保存二分图到文件
+   void UniNavGraph::save_bipartite_graph(const std::string &filename)
+   {
+      std::ofstream out(filename, std::ios::binary);
+      if (!out)
+      {
+         throw std::runtime_error("Cannot open file for writing: " + filename);
+      }
+
+      // 1. 写入文件头标识和版本
+      const char header[8] = {'B', 'I', 'P', 'G', 'R', 'P', 'H', '1'};
+      out.write(header, 8);
+
+      // 2. 写入基本元数据
+      out.write(reinterpret_cast<const char *>(&_num_points), sizeof(IdxType));
+      out.write(reinterpret_cast<const char *>(&_num_attributes), sizeof(AtrType));
+
+      // 3. 写入属性映射表
+      // 3.1 先写入条目数量
+      uint64_t map_size = _attr_to_id.size();
+      out.write(reinterpret_cast<const char *>(&map_size), sizeof(uint64_t));
+
+      // 3.2 写入每个映射条目（LabelType是uint16_t，直接存储）
+      for (const auto &[label, id] : _attr_to_id)
+      {
+         out.write(reinterpret_cast<const char *>(&label), sizeof(LabelType));
+         out.write(reinterpret_cast<const char *>(&id), sizeof(AtrType));
+      }
+
+      // 4. 写入邻接表数据
+      // 4.1 先写入节点总数
+      uint64_t total_nodes = _vector_attr_graph.size();
+      out.write(reinterpret_cast<const char *>(&total_nodes), sizeof(uint64_t));
+
+      // 4.2 写入每个节点的邻居列表
+      for (const auto &neighbors : _vector_attr_graph)
+      {
+         // 先写入邻居数量
+         uint32_t neighbor_count = neighbors.size();
+         out.write(reinterpret_cast<const char *>(&neighbor_count), sizeof(uint32_t));
+
+         // 写入邻居ID列表
+         if (!neighbors.empty())
+         {
+            out.write(reinterpret_cast<const char *>(neighbors.data()),
+                      neighbors.size() * sizeof(IdxType));
+         }
+      }
+
+      // 5. 写入文件尾校验和
+      uint32_t checksum = compute_checksum();
+      out.write(reinterpret_cast<const char *>(&checksum), sizeof(uint32_t));
+
+      std::cout << "Successfully saved bipartite graph to " << filename
+                << " (" << out.tellp() << " bytes)" << std::endl;
+   }
+
+   // fxy_add: 读取二分图
+   void UniNavGraph::load_bipartite_graph(const std::string &filename)
+   {
+      std::cout << "Loading bipartite graph from " << filename << std::endl;
+      auto start_time = std::chrono::high_resolution_clock::now();
+      std::ifstream in(filename, std::ios::binary);
+      if (!in)
+      {
+         throw std::runtime_error("Cannot open file for reading: " + filename);
+      }
+
+      // 1. 验证文件头
+      char header[8];
+      in.read(header, 8);
+      if (std::string(header, 8) != "BIPGRPH1")
+      {
+         throw std::runtime_error("Invalid file format");
+      }
+
+      // 2. 读取基本元数据
+      in.read(reinterpret_cast<char *>(&_num_points), sizeof(IdxType));
+      in.read(reinterpret_cast<char *>(&_num_attributes), sizeof(AtrType));
+
+      // 3. 读取属性映射表
+      _attr_to_id.clear();
+      _id_to_attr.clear();
+
+      // 3.1 读取条目数量
+      uint64_t map_size;
+      in.read(reinterpret_cast<char *>(&map_size), sizeof(uint64_t));
+
+      // 3.2 读取每个映射条目
+      for (uint64_t i = 0; i < map_size; ++i)
+      {
+         LabelType label;
+         AtrType id;
+
+         in.read(reinterpret_cast<char *>(&label), sizeof(LabelType));
+         in.read(reinterpret_cast<char *>(&id), sizeof(AtrType));
+
+         _attr_to_id[label] = id;
+         _id_to_attr[id] = label;
+      }
+
+      // 4. 读取邻接表数据
+      _vector_attr_graph.clear();
+
+      // 4.1 读取节点总数
+      uint64_t total_nodes;
+      in.read(reinterpret_cast<char *>(&total_nodes), sizeof(uint64_t));
+      _vector_attr_graph.resize(total_nodes);
+
+      // 4.2 读取每个节点的邻居列表
+      for (uint64_t i = 0; i < total_nodes; ++i)
+      {
+         uint32_t neighbor_count;
+         in.read(reinterpret_cast<char *>(&neighbor_count), sizeof(uint32_t));
+
+         _vector_attr_graph[i].resize(neighbor_count);
+         if (neighbor_count > 0)
+         {
+            in.read(reinterpret_cast<char *>(_vector_attr_graph[i].data()),
+                    neighbor_count * sizeof(IdxType));
+         }
+      }
+
+      // 5. 验证校验和
+      uint32_t stored_checksum;
+      in.read(reinterpret_cast<char *>(&stored_checksum), sizeof(uint32_t));
+
+      uint32_t computed_checksum = compute_checksum();
+      if (stored_checksum != computed_checksum)
+      {
+         throw std::runtime_error("Checksum verification failed");
+      }
+
+      std::cout << "- Loaded bipartite graph with " << _num_points << " vectors and "
+                << _num_attributes << " attributes in "
+                << std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::high_resolution_clock::now() - start_time)
+                       .count()
+                << " ms" << std::endl;
+   }
+
+   // fxy_add: 比较两个向量-属性二分图
+   bool UniNavGraph::compare_graphs(const ANNS::UniNavGraph &g1, const ANNS::UniNavGraph &g2)
+   {
+      // 1. 验证基本属性
+      if (g1._num_points != g2._num_points)
+      {
+         std::cerr << "Mismatch in _num_points: "
+                   << g1._num_points << " vs " << g2._num_points << std::endl;
+         return false;
+      }
+
+      if (g1._num_attributes != g2._num_attributes)
+      {
+         std::cerr << "Mismatch in _num_attributes: "
+                   << g1._num_attributes << " vs " << g2._num_attributes << std::endl;
+         return false;
+      }
+
+      // 2. 验证属性映射
+      if (g1._attr_to_id.size() != g2._attr_to_id.size())
+      {
+         std::cerr << "Mismatch in _attr_to_id size" << std::endl;
+         return false;
+      }
+
+      for (const auto &[label, id] : g1._attr_to_id)
+      {
+         auto it = g2._attr_to_id.find(label);
+         if (it == g2._attr_to_id.end())
+         {
+            std::cerr << "Label " << label << " missing in g2" << std::endl;
+            return false;
+         }
+         if (it->second != id)
+         {
+            std::cerr << "Mismatch ID for label " << label
+                      << ": " << id << " vs " << it->second << std::endl;
+            return false;
+         }
+      }
+
+      // 3. 验证反向属性映射
+      for (const auto &[id, label] : g1._id_to_attr)
+      {
+         auto it = g2._id_to_attr.find(id);
+         if (it == g2._id_to_attr.end())
+         {
+            std::cerr << "ID " << id << " missing in g2" << std::endl;
+            return false;
+         }
+         if (it->second != label)
+         {
+            std::cerr << "Mismatch label for ID " << id
+                      << ": " << label << " vs " << it->second << std::endl;
+            return false;
+         }
+      }
+
+      // 4. 验证邻接表
+      if (g1._vector_attr_graph.size() != g2._vector_attr_graph.size())
+      {
+         std::cerr << "Mismatch in graph size" << std::endl;
+         return false;
+      }
+
+      for (size_t i = 0; i < g1._vector_attr_graph.size(); ++i)
+      {
+         const auto &neighbors1 = g1._vector_attr_graph[i];
+         const auto &neighbors2 = g2._vector_attr_graph[i];
+
+         if (neighbors1.size() != neighbors2.size())
+         {
+            std::cerr << "Mismatch in neighbors count for node " << i << std::endl;
+            return false;
+         }
+
+         for (size_t j = 0; j < neighbors1.size(); ++j)
+         {
+            if (neighbors1[j] != neighbors2[j])
+            {
+               std::cerr << "Mismatch in neighbor " << j << " for node " << i
+                         << ": " << neighbors1[j] << " vs " << neighbors2[j] << std::endl;
+               return false;
+            }
+         }
+      }
+
+      std::cout << "Graphs are identical!" << std::endl;
+
+      return true;
+   }
+   //=====================================end 数据预处理：构建向量-属性二分图=========================================
+
+   //=====================================begein 查询过程：计算bitmap=========================================
+
+   // fxy_add: 构建bitmap
+   std::vector<bool> UniNavGraph::compute_attribute_bitmap(const std::vector<LabelType> &query_attributes) const
+   {
+      // 1. 初始化全true的bitmap（表示开始时所有点都满足条件）
+      std::vector<bool> bitmap(_num_points, true);
+
+      // 2. 处理每个查询属性
+      for (LabelType attr_label : query_attributes)
+      {
+         //  2.1 查找属性ID
+         auto it = _attr_to_id.find(attr_label);
+         if (it == _attr_to_id.end())
+         {
+            // 属性不存在，没有任何点能满足所有条件
+            return std::vector<bool>(_num_points, false);
+         }
+
+         // 2.2 获取属性节点ID
+         AtrType attr_id = it->second;
+         IdxType attr_node_id = _num_points + static_cast<IdxType>(attr_id);
+
+         // 2.3 创建临时bitmap记录当前属性的满足情况
+         std::vector<bool> temp_bitmap(_num_points, false);
+         for (IdxType vec_id : _vector_attr_graph[attr_node_id])
+         {
+            if (vec_id < _num_points)
+            {
+               temp_bitmap[vec_id] = true;
+            }
+         }
+
+         // 2.4 与主bitmap进行AND操作
+         for (IdxType i = 0; i < _num_points; ++i)
+         {
+            bitmap[i] = bitmap[i] && temp_bitmap[i];
+         }
+      }
+
+      return bitmap;
+   }
+
+   //====================================end 查询过程：计算bitmap=========================================
    void UniNavGraph::build_complete_graph(std::shared_ptr<Graph> graph, IdxType num_points)
    {
       for (auto i = 0; i < num_points; ++i)
@@ -287,6 +704,7 @@ namespace ANNS
                graph->neighbors[i].emplace_back(j);
    }
 
+   //=====================================begin LNG中每个f覆盖率计算=========================================
    // fxy_add: 递归打印孩子节点及其覆盖率
    void print_children_recursive(const std::shared_ptr<ANNS::LabelNavGraph> graph, IdxType group_id, std::ofstream &outfile, int indent_level)
    {
@@ -408,6 +826,8 @@ namespace ANNS
       for (IdxType group_id = 1; group_id <= _num_groups; ++group_id)
          outfile1 << group_id << " " << _group_id_to_vec_ids[group_id].size() << "\n";
    }
+
+   // =====================================end LNG中每个f覆盖率计算=========================================
 
    /*void UniNavGraph::build_label_nav_graph() {
        std::cout << "Building label navigation graph... " << std::endl;
@@ -649,7 +1069,8 @@ namespace ANNS
 
    void UniNavGraph::search(std::shared_ptr<IStorage> query_storage, std::shared_ptr<DistanceHandler> distance_handler,
                             uint32_t num_threads, IdxType Lsearch, IdxType num_entry_points, std::string scenario,
-                            IdxType K, std::pair<IdxType, float> *results, std::vector<float> &num_cmps)
+                            IdxType K, std::pair<IdxType, float> *results, std::vector<float> &num_cmps,
+                            std::vector<std::vector<bool>> &bitmap)
    {
       auto num_queries = query_storage->get_num_points();
       _query_storage = query_storage;
@@ -732,6 +1153,196 @@ namespace ANNS
          }
 
          // clean
+         search_cache_list.release_cache(search_cache);
+      }
+   }
+
+   // fxy_add
+   void UniNavGraph::search_hybrid(std::shared_ptr<IStorage> query_storage,
+                                   std::shared_ptr<DistanceHandler> distance_handler,
+                                   uint32_t num_threads, IdxType Lsearch,
+                                   IdxType num_entry_points, std::string scenario,
+                                   IdxType K, std::pair<IdxType, float> *results,
+                                   std::vector<float> &num_cmps,
+                                   std::vector<std::vector<bool>> &bitmaps)
+   {
+      auto num_queries = query_storage->get_num_points();
+      _query_storage = query_storage;
+      _distance_handler = distance_handler;
+      _scenario = scenario;
+
+      // 参数设置
+      const float COVERAGE_THRESHOLD = 0.5f;   // 覆盖率阈值
+      const int MIN_ENTRY_SETS_THRESHOLD = 10; // 最小入口集数量阈值
+
+      // preparation
+      if (K > Lsearch)
+      {
+         std::cerr << "Error: K should be less than or equal to Lsearch" << std::endl;
+         exit(-1);
+      }
+      SearchCacheList search_cache_list(num_threads, _num_points, Lsearch);
+
+      // run queries
+      omp_set_num_threads(num_threads);
+#pragma omp parallel for schedule(dynamic, 1)
+      for (auto id = 0; id < num_queries; ++id)
+      {
+         auto search_cache = search_cache_list.get_free_cache();
+         search_cache->search_queue.clear();
+         const char *query = _query_storage->get_vector(id);
+         SearchQueue cur_result;
+
+         // 获取查询标签集
+         const auto &query_labels = _query_storage->get_label_set(id);
+
+         // 计算最小超集的覆盖率总和
+         std::vector<IdxType> entry_group_ids;
+         get_min_super_sets(query_labels, entry_group_ids, false, false);
+
+         float total_coverage = 0.0f;
+         for (auto group_id : entry_group_ids)
+         {
+            total_coverage += _label_nav_graph->coverage_ratio[group_id];
+         }
+
+         // 决定使用哪种搜索策略
+         bool use_global_search = (total_coverage > COVERAGE_THRESHOLD) ||
+                                  (entry_group_ids.size() > MIN_ENTRY_SETS_THRESHOLD);
+
+         if (use_global_search)
+         {
+            // 使用全局图搜索 (DisKANN)
+            num_cmps[id] = 0;
+            search_cache->visited_set.clear();
+            search_cache->search_queue.clear();
+            cur_result.reserve(K);
+
+            // 从全局入口点开始搜索
+            std::vector<IdxType> global_entry_points;
+            if (_global_vamana_entry_point != -1)
+            {
+               global_entry_points.push_back(_global_vamana_entry_point);
+            }
+            else
+            {
+               // 如果没有预定义的全局入口点，随机选择几个
+               for (int i = 0; i < num_entry_points; ++i)
+               {
+                  global_entry_points.push_back(rand() % _num_points);
+               }
+            }
+
+            // 全局图搜索
+            num_cmps[id] = iterate_to_fixed_point_global(query, search_cache, id, global_entry_points);
+
+            // 过滤结果 - 保留前K个满足条件的邻居
+            int valid_count = 0;
+            for (size_t k = 0; k < search_cache->search_queue.size() && valid_count < K; k++)
+            {
+               auto candidate = search_cache->search_queue[k];
+               const auto &candidate_labels = _base_storage->get_label_set(candidate.id);
+
+               // 检查候选是否满足查询条件
+               bool is_valid = true;
+               if (scenario == "equality")
+               {
+                  // 对于equality场景，检查标签是否完全匹配
+                  is_valid = (candidate_labels == query_labels);
+               }
+
+               // 使用bitmaps进行额外的过滤
+               if (bitmaps.size() > id && bitmaps[id].size() > candidate.id)
+               {
+                  if (scenario == "containment")
+                  {
+                     is_valid = bitmaps[id][candidate.id];
+                  }
+                  else
+                  {
+                     is_valid = is_valid && bitmaps[id][candidate.id];
+                  }
+               }
+
+               if (is_valid)
+               {
+                  cur_result.insert(candidate.id, candidate.distance);
+                  valid_count++;
+               }
+            }
+         }
+         else
+         {
+            if (scenario == "overlap" || scenario == "nofilter")
+            {
+               num_cmps[id] = 0;
+               search_cache->visited_set.clear();
+               cur_result.reserve(K);
+
+               // 获取入口组
+               std::vector<IdxType> entry_group_ids;
+               if (scenario == "overlap")
+               {
+                  get_min_super_sets(_query_storage->get_label_set(id), entry_group_ids, false, false);
+               }
+               else
+               {
+                  get_min_super_sets({}, entry_group_ids, true, true);
+               }
+
+               // 对每个入口组进行搜索
+               for (const auto &group_id : entry_group_ids)
+               {
+                  std::vector<IdxType> entry_points;
+                  get_entry_points_given_group_id(num_entry_points, search_cache->visited_set,
+                                                  group_id, entry_points);
+
+                  // 图搜索并合并结果
+                  num_cmps[id] += iterate_to_fixed_point(query, search_cache, id,
+                                                         entry_points, true, false);
+                  for (auto k = 0; k < search_cache->search_queue.size() && k < K; ++k)
+                  {
+                     cur_result.insert(search_cache->search_queue[k].id,
+                                       search_cache->search_queue[k].distance);
+                  }
+               }
+            }
+            else
+            {
+               // 获取入口点
+               auto entry_points = get_entry_points(_query_storage->get_label_set(id),
+                                                    num_entry_points, search_cache->visited_set);
+               if (entry_points.empty())
+               {
+                  num_cmps[id] = 0;
+                  for (auto k = 0; k < K; ++k)
+                  {
+                     results[id * K + k].first = -1;
+                  }
+                  continue;
+               }
+
+               // 图搜索
+               num_cmps[id] = iterate_to_fixed_point(query, search_cache, id, entry_points);
+               cur_result = search_cache->search_queue;
+            }
+         }
+
+         // 写入结果
+         for (auto k = 0; k < K; ++k)
+         {
+            if (k < cur_result.size())
+            {
+               results[id * K + k].first = _new_to_old_vec_ids[cur_result[k].id];
+               results[id * K + k].second = cur_result[k].distance;
+            }
+            else
+            {
+               results[id * K + k].first = -1;
+            }
+         }
+
+         // 清理
          search_cache_list.release_cache(search_cache);
       }
    }
@@ -848,14 +1459,62 @@ namespace ANNS
       return num_cmps;
    }
 
+   // fxy_add
+   IdxType UniNavGraph::iterate_to_fixed_point_global(const char *query, std::shared_ptr<SearchCache> search_cache,
+                                                      IdxType target_id, const std::vector<IdxType> &entry_points,
+                                                      bool clear_search_queue, bool clear_visited_set)
+   {
+      auto dim = _base_storage->get_dim();
+      auto &search_queue = search_cache->search_queue;
+      auto &visited_set = search_cache->visited_set;
+      std::vector<IdxType> neighbors;
+      if (clear_search_queue)
+         search_queue.clear();
+      if (clear_visited_set)
+         visited_set.clear();
+
+      // entry point
+      for (const auto &entry_point : entry_points)
+         search_queue.insert(entry_point, _distance_handler->compute(query, _base_storage->get_vector(entry_point), dim));
+      IdxType num_cmps = entry_points.size();
+
+      // greedily expand closest nodes
+      while (search_queue.has_unexpanded_node())
+      {
+         const Candidate &cur = search_queue.get_closest_unexpanded();
+
+         // iterate neighbors
+         {
+            std::lock_guard<std::mutex> lock(_global_graph->neighbor_locks[cur.id]);
+            neighbors = _global_graph->neighbors[cur.id];
+         }
+         for (auto i = 0; i < neighbors.size(); ++i)
+         {
+
+            // prefetch
+            if (i + 1 < neighbors.size() && visited_set.check(neighbors[i + 1]) == false)
+               _base_storage->prefetch_vec_by_id(neighbors[i + 1]);
+
+            // skip if visited
+            auto &neighbor = neighbors[i];
+            if (visited_set.check(neighbor))
+               continue;
+            visited_set.set(neighbor);
+
+            // push to search queue
+            search_queue.insert(neighbor, _distance_handler->compute(query, _base_storage->get_vector(neighbor), dim));
+            num_cmps++;
+         }
+      }
+      return num_cmps;
+   }
+
    void UniNavGraph::save(std::string index_path_prefix)
    {
       fs::create_directories(index_path_prefix);
-      std::cout << "Saving index to " << index_path_prefix << " ..." << std::endl;
       auto start_time = std::chrono::high_resolution_clock::now();
 
       // save meta data
-      std::cout << "Saving meta data ..." << std::endl;
       std::map<std::string, std::string> meta_data;
       statistics();
       meta_data["num_points"] = std::to_string(_num_points);
@@ -877,61 +1536,49 @@ namespace ANNS
       meta_data["index_size(MB)"] = std::to_string(_index_size);
       std::string meta_filename = index_path_prefix + "meta";
       write_kv_file(meta_filename, meta_data);
-      std::cout << "Meta data saved in " << meta_filename << std::endl;
 
       // save vectors and label sets
-      std::cout << "Saving vectors and label sets ..." << std::endl;
       std::string bin_file = index_path_prefix + "vecs.bin";
       std::string label_file = index_path_prefix + "labels.txt";
       _base_storage->write_to_file(bin_file, label_file);
-      std::cout << "vecs.bin saved in " << bin_file << std::endl;
 
       // save group id to label set
-      std::cout << "Saving group_id_to_label_set ..." << std::endl;
       std::string group_id_to_label_set_filename = index_path_prefix + "group_id_to_label_set";
-      std::cout << "size: " << _group_id_to_label_set.size() << std::endl;
-      std::cout << "group_id_to_label_set_filename: " << group_id_to_label_set_filename << std::endl;
       write_2d_vectors(group_id_to_label_set_filename, _group_id_to_label_set);
 
       // save group id to range
-      std::cout << "Saving group_id_to_range ..." << std::endl;
       std::string group_id_to_range_filename = index_path_prefix + "group_id_to_range";
       write_2d_vectors(group_id_to_range_filename, _group_id_to_range);
-      std::cout << "group_id_to_range_filename: " << group_id_to_range_filename << std::endl;
 
       // save group id to entry point
-      std::cout << "Saving group_entry_points ..." << std::endl;
       std::string group_entry_points_filename = index_path_prefix + "group_entry_points";
       write_1d_vector(group_entry_points_filename, _group_entry_points);
-      std::cout << "group_entry_points_filename: " << group_entry_points_filename << std::endl;
 
       // save new to old vec ids
-      std::cout << "Saving new_to_old_vec_ids ..." << std::endl;
       std::string new_to_old_vec_ids_filename = index_path_prefix + "new_to_old_vec_ids";
       write_1d_vector(new_to_old_vec_ids_filename, _new_to_old_vec_ids);
-      std::cout << "new_to_old_vec_ids_filename: " << new_to_old_vec_ids_filename << std::endl;
 
       // save trie index
-      std::cout << "Saving trie index ..." << std::endl;
       std::string trie_filename = index_path_prefix + "trie";
       _trie_index.save(trie_filename);
-      std::cout << "trie_filename: " << trie_filename << std::endl;
 
       // save graph data
-      std::cout << "Saving graph data ..." << std::endl;
       std::string graph_filename = index_path_prefix + "graph";
       _graph->save(graph_filename);
-      std::cout << "graph_filename: " << graph_filename << std::endl;
 
-      std::cout << "Saving global graph data..." << std::endl;
       std::string global_graph_filename = index_path_prefix + "global_graph";
       _global_graph->save(global_graph_filename);
-      std::cout << "global_graph_filename: " << global_graph_filename << std::endl;
 
-      std::cout << "Saving global_vamana_entry_point..." << std::endl;
       std::string global_vamana_entry_point_filename = index_path_prefix + "global_vamana_entry_point";
       write_one_T(global_vamana_entry_point_filename, _global_vamana_entry_point);
-      std::cout << "global_vamana_entry_point_filename: " << global_vamana_entry_point_filename << std::endl;
+
+      // save LNG coverage ratio
+      std::string coverage_ratio_filename = index_path_prefix + "lng_coverage_ratio";
+      write_1d_vector(coverage_ratio_filename, _label_nav_graph->coverage_ratio);
+
+      // save vector attr graph data
+      std::string vector_attr_graph_filename = index_path_prefix + "vector_attr_graph";
+      save_bipartite_graph(vector_attr_graph_filename);
 
       // print
       std::cout << "- Index saved in " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start_time).count() << " ms" << std::endl;
@@ -977,6 +1624,21 @@ namespace ANNS
       std::string graph_filename = index_path_prefix + "graph";
       _graph = std::make_shared<Graph>(_base_storage->get_num_points());
       _graph->load(graph_filename);
+
+      // fxy_add:load global graph data
+      std::string global_graph_filename = index_path_prefix + "global_graph";
+      _global_graph = std::make_shared<Graph>(_base_storage->get_num_points());
+      _global_graph->load(global_graph_filename);
+
+      // fxy_add: load global vamana entry point
+      std::string global_vamana_entry_point_filename = index_path_prefix + "global_vamana_entry_point";
+      load_one_T(global_vamana_entry_point_filename, _global_vamana_entry_point);
+
+      // fxy_add: load LNG coverage ratio
+      std::string coverage_ratio_filename = index_path_prefix + "lng_coverage_ratio";
+      std::cout << "_label_nav_graph->coverage_ratio size: " << _label_nav_graph->coverage_ratio.size() << std::endl;
+      load_1d_vector(coverage_ratio_filename, _label_nav_graph->coverage_ratio);
+      std::cout << "LNG coverage ratio loaded." << std::endl;
 
       // print
       std::cout << "- Index loaded in " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start_time).count() << " ms" << std::endl;

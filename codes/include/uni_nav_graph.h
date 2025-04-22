@@ -7,12 +7,14 @@
 #include "search_cache.h"
 #include "label_nav_graph.h"
 #include "vamana/vamana.h"
+#include <unordered_map>
 
 namespace ANNS
 {
    class UniNavGraph
    {
    public:
+      UniNavGraph(IdxType num_nodes) : _label_nav_graph(std::make_shared<LabelNavGraph>(num_nodes)) {} // 修改构造函数以初始化 _label_nav_graph
       UniNavGraph() = default;
       ~UniNavGraph() = default;
 
@@ -22,7 +24,12 @@ namespace ANNS
 
       void search(std::shared_ptr<IStorage> query_storage, std::shared_ptr<DistanceHandler> distance_handler,
                   uint32_t num_threads, IdxType Lsearch, IdxType num_entry_points, std::string scenario,
-                  IdxType K, std::pair<IdxType, float> *results, std::vector<float> &num_cmps);
+                  IdxType K, std::pair<IdxType, float> *results, std::vector<float> &num_cmps,
+                  std::vector<std::vector<bool>> &bitmap);
+      void search_hybrid(std::shared_ptr<IStorage> query_storage, std::shared_ptr<DistanceHandler> distance_handler,
+                         uint32_t num_threads, IdxType Lsearch, IdxType num_entry_points, std::string scenario,
+                         IdxType K, std::pair<IdxType, float> *results, std::vector<float> &num_cmps,
+                         std::vector<std::vector<bool>> &bitmap);
 
       // I/O
       void save(std::string index_path_prefix);
@@ -38,6 +45,15 @@ namespace ANNS
                                      float keep_prob,
                                      bool stratified_sampling,
                                      bool verify);
+      void load_bipartite_graph(const std::string &filename);
+      bool compare_graphs(const ANNS::UniNavGraph &g1, const ANNS::UniNavGraph &g2);
+      IdxType _num_points;
+      std::vector<std::vector<IdxType>> _vector_attr_graph; // 邻接表表示的图
+      std::unordered_map<LabelType, AtrType> _attr_to_id;   // 属性到ID的映射
+      std::unordered_map<AtrType, LabelType> _id_to_attr;   // ID到属性的映射
+      AtrType _num_attributes;                              // 唯一属性数量
+
+      std::vector<bool> compute_attribute_bitmap(const std::vector<LabelType> &query_attributes) const; // 构建bitmap
 
    private:
       // data
@@ -45,7 +61,7 @@ namespace ANNS
           _query_storage;
       std::shared_ptr<DistanceHandler> _distance_handler;
       std::shared_ptr<Graph> _graph;
-      IdxType _num_points;
+      // IdxType _num_points;
 
       // trie index and vector groups
       IdxType _num_groups;
@@ -81,8 +97,21 @@ namespace ANNS
       IdxType _global_vamana_entry_point;     // 全局 Vamana 实例的入口点
       void build_global_vamana_graph();
 
+      // build attr_id_graph（数据预处理）
+      // std::vector<std::vector<IdxType>> _vector_attr_graph; // 邻接表表示的图
+      // std::unordered_map<LabelType, AtrType> _attr_to_id;   // 属性到ID的映射
+      // std::unordered_map<AtrType, LabelType> _id_to_attr;   // ID到属性的映射
+      // AtrType _num_attributes;                              // 唯一属性数量
+      void build_vector_and_attr_graph();
+      size_t count_graph_edges() const;
+      void save_bipartite_graph_info() const;
+      void save_bipartite_graph(const std::string &filename);
+      uint32_t compute_checksum() const;
+      // void load_bipartite_graph(const std::string &filename);
+
       // index parameters for each graph
-      IdxType _max_degree, _Lbuild;
+      IdxType _max_degree,
+          _Lbuild;
       float _alpha;
       uint32_t _num_threads;
       std::string _scenario;
@@ -105,6 +134,10 @@ namespace ANNS
       IdxType iterate_to_fixed_point(const char *query, std::shared_ptr<SearchCache> search_cache,
                                      IdxType target_id, const std::vector<IdxType> &entry_points,
                                      bool clear_search_queue = true, bool clear_visited_set = true);
+      // search in global graph
+      IdxType iterate_to_fixed_point_global(const char *query, std::shared_ptr<SearchCache> search_cache,
+                                            IdxType target_id, const std::vector<IdxType> &entry_points,
+                                            bool clear_search_queue = true, bool clear_visited_set = true);
 
       // statistics
       float _index_time, _label_processing_time, _build_graph_time;
