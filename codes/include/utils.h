@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include "config.h"
+#include <unordered_set>
 
 #define SEP_LINE "------------------------------------------------------------\n"
 
@@ -17,7 +18,6 @@
 
 namespace ANNS
 {
-
    // write and load key-value file
    void write_kv_file(const std::string &filename, const std::map<std::string, std::string> &kv_map);
    std::map<std::string, std::string> parse_kv_file(const std::string &filename);
@@ -67,6 +67,32 @@ namespace ANNS
       vec.clear();
       while (in >> value)
          vec.push_back(value);
+   }
+
+   // write 1D-std::vector , for std::pair
+   template <typename T1, typename T2>
+   void write_1d_pair_vector(const std::string &filename, const std::vector<std::pair<T1, T2>> &vec)
+   {
+      std::ofstream out(filename);
+      for (auto &each : vec)
+         out << each.first << " " << each.second << std::endl;
+   }
+
+   // load 1D-std::vector , for std::pair
+   template <typename T1, typename T2>
+   void load_1d_pair_vector(const std::string &filename, std::vector<std::pair<T1, T2>> &vec)
+   {
+      std::ifstream in(filename);
+      std::string line;
+      vec.clear();
+      while (std::getline(in, line))
+      {
+         std::istringstream iss(line);
+         T1 first;
+         T2 second;
+         iss >> first >> second;
+         vec.push_back(std::make_pair(first, second));
+      }
    }
 
    // write 2D-std::vector
@@ -122,6 +148,37 @@ namespace ANNS
          T first, second;
          iss >> first >> second;
          vecs.push_back(std::make_pair(first, second));
+      }
+   }
+
+   // write 2D-std::vector , for std::unordered_set<IdxType>
+   template <typename T>
+   void write_2d_vectors(const std::string &filename, const std::vector<std::unordered_set<T>> &vecs)
+   {
+      std::ofstream out(filename);
+      for (const auto &set : vecs)
+      {
+         for (const auto &elem : set)
+            out << elem << " ";
+         out << std::endl;
+      }
+   }
+
+   // load 2D-std::vector , for std::unordered_set<IdxType>
+   template <typename T>
+   void load_2d_vectors(const std::string &filename, std::vector<std::unordered_set<T>> &vecs)
+   {
+      std::ifstream in(filename);
+      std::string line;
+      vecs.clear();
+      while (std::getline(in, line))
+      {
+         std::istringstream iss(line);
+         std::unordered_set<T> set;
+         T value;
+         while (iss >> value)
+            set.insert(value);
+         vecs.push_back(set);
       }
    }
 }

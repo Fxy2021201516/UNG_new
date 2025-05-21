@@ -5,6 +5,7 @@
 #include <boost/filesystem.hpp>
 #include <vector>
 #include <queue>
+#include <stack>
 
 #include <random>
 #include <fstream>
@@ -62,8 +63,9 @@ namespace ANNS
       build_trie_and_divide_groups();
       _graph = std::make_shared<ANNS::Graph>(base_storage->get_num_points());
       _global_graph = std::make_shared<ANNS::Graph>(base_storage->get_num_points());
+      std::cout << "begin prepare_group_storages_graphs" << std::endl;
       prepare_group_storages_graphs();
-      _label_processing_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+      _label_processing_time = std::chrono::duration<double, std::milli>(
                                    std::chrono::high_resolution_clock::now() - start_time)
                                    .count();
       std::cout << "- Finished in " << _label_processing_time << " ms" << std::endl;
@@ -83,6 +85,7 @@ namespace ANNS
 
          // build the label navigating graph
          build_label_nav_graph();
+         get_descendants_info();
 
          // calculate the coverage ratio
          cal_f_coverage_ratio();
@@ -92,14 +95,13 @@ namespace ANNS
       }
 
       // index time
-      _index_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+      _index_time = std::chrono::duration<double, std::milli>(
                         std::chrono::high_resolution_clock::now() - all_start_time)
                         .count();
    }
 
    void UniNavGraph::build_trie_and_divide_groups()
    {
-
       // create groups for base label sets
       IdxType new_group_id = 1;
       for (auto vec_id = 0; vec_id < _num_points; ++vec_id)
@@ -257,7 +259,7 @@ namespace ANNS
          exit(-1);
       }
 
-      _build_graph_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+      _build_graph_time = std::chrono::duration<double, std::milli>(
                               std::chrono::high_resolution_clock::now() - start_time)
                               .count();
       std::cout << "\r- Finished in " << _build_graph_time << " ms" << std::endl;
@@ -273,7 +275,7 @@ namespace ANNS
 
       _global_vamana->build(_base_storage, _distance_handler, _global_graph, _max_degree, _Lbuild, _alpha, 1);
 
-      auto build_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+      auto build_time = std::chrono::duration<double, std::milli>(
                             std::chrono::high_resolution_clock::now() - start_time)
                             .count();
       _global_vamana_entry_point = _global_vamana->get_entry_point();
@@ -329,7 +331,7 @@ namespace ANNS
 
       // 统计信息
       _num_attributes = attr_id;
-      auto build_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+      auto build_time = std::chrono::duration<double, std::milli>(
                             std::chrono::high_resolution_clock::now() - start_time)
                             .count();
       std::cout << "- Built bipartite graph with " << _num_points << " vectors and "
@@ -553,7 +555,7 @@ namespace ANNS
 
       std::cout << "- Loaded bipartite graph with " << _num_points << " vectors and "
                 << _num_attributes << " attributes in "
-                << std::chrono::duration_cast<std::chrono::milliseconds>(
+                << std::chrono::duration<double, std::milli>(
                        std::chrono::high_resolution_clock::now() - start_time)
                        .count()
                 << " ms" << std::endl;
@@ -756,78 +758,168 @@ namespace ANNS
    // fxy_add：计算每个label set的向量覆盖比率
    void UniNavGraph::cal_f_coverage_ratio()
    {
-      // step1：初始化，计算每个label set的向量覆盖比率(有且仅有)
       std::cout << "Calculating coverage ratio..." << std::endl;
       auto start_time = std::chrono::high_resolution_clock::now();
-      _label_nav_graph->coverage_ratio.resize(_num_groups + 1, 0.0);
+
+      // Step 0: 初始化covered_sets
+      _label_nav_graph->coverage_ratio.clear();
+      _label_nav_graph->covered_sets.clear();
+      _label_nav_graph->covered_sets.resize(_num_groups + 1);
+
+      // Step 1: 初始化每个 group 的覆盖集合
       for (IdxType group_id = 1; group_id <= _num_groups; ++group_id)
       {
-         const auto &label_set = _group_id_to_label_set[group_id];
-         if (label_set.empty())
+         const auto &vec_ids = _group_id_to_vec_ids[group_id];
+         if (vec_ids.empty())
             continue;
 
-         double coverage_ratio = static_cast<double>(_group_id_to_vec_ids[group_id].size()) / _num_points;
-         _label_nav_graph->coverage_ratio[group_id] = coverage_ratio;
+         _label_nav_graph->covered_sets[group_id].insert(vec_ids.begin(), vec_ids.end());
       }
 
-      // step2：检查出度为0的group并压入队列
+      // Step 2: 找出所有叶子节点（出度为 0）
       std::queue<IdxType> q;
+      std::vector<int> out_degree(_num_groups + 1, 0); // 复制一份出度用于拓扑传播
+
       for (IdxType group_id = 1; group_id <= _num_groups; ++group_id)
       {
-         if (_label_nav_graph->out_neighbors[group_id].empty())
-         {
+         out_degree[group_id] = _label_nav_graph->out_neighbors[group_id].size();
+         if (out_degree[group_id] == 0)
             q.push(group_id);
-         }
       }
       std::cout << "- Number of leaf nodes: " << q.size() << std::endl;
 
-      // step3：从队列中取出group，更新其父节点的覆盖比率
+      // Step 3: 自底向上合并集合
       while (!q.empty())
       {
          IdxType current = q.front();
          q.pop();
 
-         // 更新父节点的覆盖比率
          for (auto parent : _label_nav_graph->in_neighbors[current])
          {
-            _label_nav_graph->coverage_ratio[parent] += _label_nav_graph->coverage_ratio[current];
-            _label_nav_graph->out_degree[parent] -= 1;
-            if (_label_nav_graph->out_degree[parent] == 0)
+            // 将当前节点的集合合并到父节点中
+            _label_nav_graph->covered_sets[parent].insert(
+                _label_nav_graph->covered_sets[current].begin(),
+                _label_nav_graph->covered_sets[current].end());
+
+            // 减少父节点剩余未处理的子节点数
+            out_degree[parent]--;
+            if (out_degree[parent] == 0)
             {
                q.push(parent);
             }
          }
       }
 
-      // 时间
-      auto _coverage_ratio_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                      std::chrono::high_resolution_clock::now() - start_time)
-                                      .count();
-
-      std::cout << "- Coverage ratio calculated in " << _coverage_ratio_time << " ms" << std::endl;
-
-      // step4：递归存储所有孩子的覆盖比率
-      std::ofstream outfile0("LNG_coverage_ratio.txt");
-      output_coverage_ratio(_label_nav_graph, _num_groups, outfile0);
-      outfile0.close();
-
-      // step5：存储每个group的覆盖比率和标签集 Format: GroupID CoverageRatio LabelSet
-      std::ofstream outfile("group_coverage_ratio.txt");
+      // Step 4: 计算最终覆盖率
+      _label_nav_graph->coverage_ratio.resize(_num_groups + 1, 0.0);
       for (IdxType group_id = 1; group_id <= _num_groups; ++group_id)
       {
-         outfile << group_id << " " << _label_nav_graph->coverage_ratio[group_id] << " ";
-         for (const auto &label : _group_id_to_label_set[group_id])
-            outfile << label << " ";
-         outfile << "\n";
+         size_t covered_count = _label_nav_graph->covered_sets[group_id].size();
+         _label_nav_graph->coverage_ratio[group_id] = static_cast<double>(covered_count) / _num_points;
       }
 
-      // step6：存储每个group里面有几个向量 Format: GroupID NumVectors
-      std::ofstream outfile1("group_num_vectors.txt");
+      // Step 5: 输出时间
+      auto _coverage_ratio_time = std::chrono::duration<double, std::milli>(
+                                      std::chrono::high_resolution_clock::now() - start_time)
+                                      .count();
+      std::cout << "- Coverage ratio calculated in " << _coverage_ratio_time << " ms" << std::endl;
+
+      // // step4：递归存储所有孩子的覆盖比率
+      // std::ofstream outfile0("LNG_coverage_ratio.txt");
+      // output_coverage_ratio(_label_nav_graph, _num_groups, outfile0);
+      // outfile0.close();
+
+      // // step5：存储每个group的覆盖比率和标签集 Format: GroupID CoverageRatio LabelSet
+      // std::ofstream outfile("group_coverage_ratio.txt");
+      // for (IdxType group_id = 1; group_id <= _num_groups; ++group_id)
+      // {
+      //    outfile << group_id << " " << _label_nav_graph->coverage_ratio[group_id] << " ";
+      //    for (const auto &label : _group_id_to_label_set[group_id])
+      //       outfile << label << " ";
+      //    outfile << "\n";
+      // }
+
+      // // step6：存储每个group里面有几个向量 Format: GroupID NumVectors
+      // std::ofstream outfile1("group_num_vectors.txt");
+      // for (IdxType group_id = 1; group_id <= _num_groups; ++group_id)
+      //    outfile1 << group_id << " " << _group_id_to_vec_ids[group_id].size() << "\n";
+   }
+   // =====================================end LNG中每个f覆盖率计算=========================================
+
+   // =====================================begin 计算LNG中后代的个数=========================================
+   // fxy_add: 计算所有节点的后代数量，并更新_lng_descendants_num和_lng_descendants
+   void UniNavGraph::get_descendants_info()
+   {
+      using PairType = std::pair<IdxType, int>;
+      std::vector<PairType> descendants_num(_num_groups);                    // 存储后代个数
+      std::vector<std::unordered_set<IdxType>> descendants_set(_num_groups); // 存储后代集合
+
+#pragma omp parallel for
       for (IdxType group_id = 1; group_id <= _num_groups; ++group_id)
-         outfile1 << group_id << " " << _group_id_to_vec_ids[group_id].size() << "\n";
+      {
+         std::vector<bool> visited(_num_groups + 1, false);
+         std::stack<IdxType> stack;
+         stack.push(group_id);
+
+         size_t count = 0;
+         std::unordered_set<IdxType> temp_set;
+
+         while (!stack.empty())
+         {
+            IdxType current = stack.top();
+            stack.pop();
+
+            if (visited[current])
+            {
+               continue;
+            }
+            visited[current] = true;
+
+            for (auto child_id : _label_nav_graph->out_neighbors[current])
+            {
+               if (child_id == current)
+                  continue; // 跳过自环
+
+               if (!visited[child_id])
+               {
+                  count += 1;
+                  temp_set.insert(child_id);
+                  stack.push(child_id);
+               }
+            }
+         }
+
+         descendants_num[group_id - 1] = PairType(group_id, static_cast<int>(count));
+         descendants_set[group_id - 1] = std::move(temp_set);
+      }
+
+      // 单线程写入类成员变量
+      _label_nav_graph->_lng_descendants_num = std::move(descendants_num);
+      _label_nav_graph->_lng_descendants = std::move(descendants_set);
+
+      // 计算平均后代个数
+      double total_descendants = 0;
+      for (const auto &pair : _label_nav_graph->_lng_descendants_num)
+      {
+         total_descendants += pair.second;
+      }
+      _label_nav_graph->avg_descendants = _num_groups > 0 ? total_descendants / _num_groups : 0;
+      std::cout << "Descendants Info" << std::endl;
+      std::cout << "- Number of groups: " << _num_groups << std::endl;
+      std::cout << "- Average number of descendants per group: " << _label_nav_graph->avg_descendants << std::endl;
+
+      // 输出到文件
+      std::ofstream outfile("group_descendants_stats.txt");
+      if (outfile.is_open())
+      {
+         outfile << "Number of groups: " << _num_groups << "\n";
+         outfile << "Average number of descendants per group: " << _label_nav_graph->avg_descendants << "\n";
+         outfile.close();
+         std::cout << "- Statistics written to 'group_descendants_stats.txt'" << std::endl;
+      }
    }
 
-   // =====================================end LNG中每个f覆盖率计算=========================================
+   // =====================================end 计算LNG中后代的个数=========================================
 
    /*void UniNavGraph::build_label_nav_graph() {
        std::cout << "Building label navigation graph... " << std::endl;
@@ -850,7 +942,7 @@ namespace ANNS
            for (auto each : _label_nav_graph->out_neighbors[group_id])
                _label_nav_graph->in_neighbors[each].emplace_back(group_id);
 
-       _build_LNG_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+       _build_LNG_time = std::chrono::duration<double, std::milli>(
                          std::chrono::high_resolution_clock::now() - start_time).count();
        std::cout << "\r- Finished in " << _build_LNG_time << " ms" << std::endl;
    }*/
@@ -925,7 +1017,7 @@ namespace ANNS
       }
 
       // outfile.close();
-      _build_LNG_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+      _build_LNG_time = std::chrono::duration<double, std::milli>(
                             std::chrono::high_resolution_clock::now() - start_time)
                             .count();
       std::cout << "\r- Finished in " << _build_LNG_time << " ms" << std::endl;
@@ -1061,7 +1153,7 @@ namespace ANNS
             _graph->neighbors[from_id].emplace_back(to_id);
       }
 
-      _build_cross_edges_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+      _build_cross_edges_time = std::chrono::duration<double, std::milli>(
                                     std::chrono::high_resolution_clock::now() - start_time)
                                     .count();
       std::cout << "\r- Finish in " << _build_cross_edges_time << " ms" << std::endl;
@@ -1164,61 +1256,94 @@ namespace ANNS
                                    IdxType num_entry_points, std::string scenario,
                                    IdxType K, std::pair<IdxType, float> *results,
                                    std::vector<float> &num_cmps,
-                                   std::vector<std::vector<bool>> &bitmaps)
+                                   std::vector<QueryStats> &query_stats,
+                                   std::vector<std::vector<bool>> &bitmaps,
+                                   bool is_ori_ung)
    {
       auto num_queries = query_storage->get_num_points();
       _query_storage = query_storage;
       _distance_handler = distance_handler;
       _scenario = scenario;
 
-      // 参数设置
-      const float COVERAGE_THRESHOLD = 0.5f;   // 覆盖率阈值
-      const int MIN_ENTRY_SETS_THRESHOLD = 10; // 最小入口集数量阈值
+      // 初始化统计信息
+      query_stats.resize(num_queries);
 
-      // preparation
+      // 参数检查
       if (K > Lsearch)
       {
          std::cerr << "Error: K should be less than or equal to Lsearch" << std::endl;
          exit(-1);
       }
+
+      // 搜索参数
+      const float COVERAGE_THRESHOLD = 0.8f;
+      const int MIN_LNG_DESCENDANTS_THRESHOLD = _num_points / 2.5;
       SearchCacheList search_cache_list(num_threads, _num_points, Lsearch);
 
-      // run queries
+      // 并行查询处理
       omp_set_num_threads(num_threads);
 #pragma omp parallel for schedule(dynamic, 1)
       for (auto id = 0; id < num_queries; ++id)
       {
+         auto &stats = query_stats[id];
+         auto start_time = std::chrono::high_resolution_clock::now();
+
          auto search_cache = search_cache_list.get_free_cache();
-         search_cache->search_queue.clear();
          const char *query = _query_storage->get_vector(id);
          SearchQueue cur_result;
+         cur_result.reserve(K);
 
          // 获取查询标签集
          const auto &query_labels = _query_storage->get_label_set(id);
-
-         // 计算最小超集的覆盖率总和
-         std::vector<IdxType> entry_group_ids;
-         get_min_super_sets(query_labels, entry_group_ids, false, false);
-
-         float total_coverage = 0.0f;
-         for (auto group_id : entry_group_ids)
+         for (auto i = 0; i < query_labels.size(); ++i)
          {
-            total_coverage += _label_nav_graph->coverage_ratio[group_id];
+            std::cout << query_labels[i] << " ";
          }
 
-         // 决定使用哪种搜索策略
-         bool use_global_search = (total_coverage > COVERAGE_THRESHOLD) ||
-                                  (entry_group_ids.size() > MIN_ENTRY_SETS_THRESHOLD);
+         // 1. 计算入口组信息
+         std::vector<IdxType> entry_group_ids;
+         get_min_super_sets(query_labels, entry_group_ids, true, true);
+         stats.num_entry_points = entry_group_ids.size();
 
+         // 2. 读取LNG后代数量
+         std::unordered_set<IdxType> all_descendants; // unordered_set可以避免重复
+         for (auto group_id : entry_group_ids)
+         {
+            if (group_id <= 0 || group_id > _label_nav_graph->_lng_descendants.size())
+            {
+               std::cerr << "Error: Invalid group ID " << group_id << std::endl;
+               continue;
+            }
+
+            const auto &descendants = _label_nav_graph->_lng_descendants[group_id];
+            all_descendants.insert(descendants.begin(), descendants.end());
+         }
+         stats.num_lng_descendants = all_descendants.size();
+
+         // 3. 计算覆盖率决定搜索策略
+         std::unordered_set<IdxType> merged_set;
+         for (auto group_id : entry_group_ids)
+         {
+            merged_set.insert(
+                _label_nav_graph->covered_sets[group_id].begin(),
+                _label_nav_graph->covered_sets[group_id].end());
+         }
+         float total_unique_coverage = static_cast<float>(merged_set.size()) / _num_points;
+         stats.entry_group_total_coverage = total_unique_coverage;
+
+         bool use_global_search = (total_unique_coverage > COVERAGE_THRESHOLD) ||
+                                  (all_descendants.size() > MIN_LNG_DESCENDANTS_THRESHOLD);
+         if (is_ori_ung)
+            use_global_search = false;
+         stats.is_global_search = use_global_search;
+
+         // 4. 执行搜索
          if (use_global_search)
          {
-            // 使用全局图搜索 (DisKANN)
-            num_cmps[id] = 0;
+            // 4.1 全局图搜索模式
             search_cache->visited_set.clear();
-            search_cache->search_queue.clear();
-            cur_result.reserve(K);
 
-            // 从全局入口点开始搜索
+            // 获取全局入口点
             std::vector<IdxType> global_entry_points;
             if (_global_vamana_entry_point != -1)
             {
@@ -1226,17 +1351,18 @@ namespace ANNS
             }
             else
             {
-               // 如果没有预定义的全局入口点，随机选择几个
+               // 随机选择入口点
                for (int i = 0; i < num_entry_points; ++i)
                {
                   global_entry_points.push_back(rand() % _num_points);
                }
             }
 
-            // 全局图搜索
+            // 记录初始距离计算次数
             num_cmps[id] = iterate_to_fixed_point_global(query, search_cache, id, global_entry_points);
+            stats.num_distance_calcs = num_cmps[id];
 
-            // 过滤结果 - 保留前K个满足条件的邻居
+            // 过滤结果
             int valid_count = 0;
             for (size_t k = 0; k < search_cache->search_queue.size() && valid_count < K; k++)
             {
@@ -1247,11 +1373,10 @@ namespace ANNS
                bool is_valid = true;
                if (scenario == "equality")
                {
-                  // 对于equality场景，检查标签是否完全匹配
                   is_valid = (candidate_labels == query_labels);
                }
 
-               // 使用bitmaps进行额外的过滤
+               // 使用bitmaps进行过滤
                if (bitmaps.size() > id && bitmaps[id].size() > candidate.id)
                {
                   if (scenario == "containment")
@@ -1273,62 +1398,55 @@ namespace ANNS
          }
          else
          {
+            // 4.2 传统搜索模式
+            search_cache->visited_set.clear();
+
             if (scenario == "overlap" || scenario == "nofilter")
             {
-               num_cmps[id] = 0;
-               search_cache->visited_set.clear();
-               cur_result.reserve(K);
-
-               // 获取入口组
-               std::vector<IdxType> entry_group_ids;
-               if (scenario == "overlap")
-               {
-                  get_min_super_sets(_query_storage->get_label_set(id), entry_group_ids, false, false);
-               }
-               else
-               {
-                  get_min_super_sets({}, entry_group_ids, true, true);
-               }
-
-               // 对每个入口组进行搜索
+               // 获取入口点
+               std::vector<IdxType> entry_points;
                for (const auto &group_id : entry_group_ids)
                {
-                  std::vector<IdxType> entry_points;
-                  get_entry_points_given_group_id(num_entry_points, search_cache->visited_set,
-                                                  group_id, entry_points);
+                  std::vector<IdxType> group_entry_points;
+                  get_entry_points_given_group_id(num_entry_points,
+                                                  search_cache->visited_set,
+                                                  group_id,
+                                                  group_entry_points);
+                  entry_points.insert(entry_points.end(),
+                                      group_entry_points.begin(),
+                                      group_entry_points.end());
+               }
 
-                  // 图搜索并合并结果
-                  num_cmps[id] += iterate_to_fixed_point(query, search_cache, id,
-                                                         entry_points, true, false);
-                  for (auto k = 0; k < search_cache->search_queue.size() && k < K; ++k)
-                  {
-                     cur_result.insert(search_cache->search_queue[k].id,
-                                       search_cache->search_queue[k].distance);
-                  }
+               // 执行搜索
+               num_cmps[id] = iterate_to_fixed_point(query, search_cache, id,
+                                                     entry_points, true, false);
+               stats.num_distance_calcs = num_cmps[id];
+
+               // 收集结果
+               for (auto k = 0; k < search_cache->search_queue.size() && k < K; ++k)
+               {
+                  cur_result.insert(search_cache->search_queue[k].id,
+                                    search_cache->search_queue[k].distance);
                }
             }
             else
             {
-               // 获取入口点
-               auto entry_points = get_entry_points(_query_storage->get_label_set(id),
-                                                    num_entry_points, search_cache->visited_set);
+               // containment/equality场景
+               auto entry_points = get_entry_points(query_labels, num_entry_points,
+                                                    search_cache->visited_set);
                if (entry_points.empty())
                {
-                  num_cmps[id] = 0;
-                  for (auto k = 0; k < K; ++k)
-                  {
-                     results[id * K + k].first = -1;
-                  }
+                  stats.num_distance_calcs = 0;
                   continue;
                }
 
-               // 图搜索
                num_cmps[id] = iterate_to_fixed_point(query, search_cache, id, entry_points);
+               stats.num_distance_calcs = num_cmps[id];
                cur_result = search_cache->search_queue;
             }
          }
 
-         // 写入结果
+         // 5. 记录结果
          for (auto k = 0; k < K; ++k)
          {
             if (k < cur_result.size())
@@ -1342,7 +1460,11 @@ namespace ANNS
             }
          }
 
-         // 清理
+         // 6. 记录统计信息
+         stats.time_ms = std::chrono::duration<double, std::milli>(
+                             std::chrono::high_resolution_clock::now() - start_time)
+                             .count();
+
          search_cache_list.release_cache(search_cache);
       }
    }
@@ -1576,12 +1698,25 @@ namespace ANNS
       std::string coverage_ratio_filename = index_path_prefix + "lng_coverage_ratio";
       write_1d_vector(coverage_ratio_filename, _label_nav_graph->coverage_ratio);
 
+      // save covered_sets in LNG
+      std::string covered_sets_filename = index_path_prefix + "covered_sets";
+      write_2d_vectors(covered_sets_filename, _label_nav_graph->covered_sets);
+      std::cout << "LNG covered_sets saved." << std::endl;
+
+      // save LNG descendant num
+      std::string lng_descendants_num_filename = index_path_prefix + "lng_descendants_num";
+      write_1d_pair_vector(lng_descendants_num_filename, _label_nav_graph->_lng_descendants_num);
+
+      // save LNG descendants
+      std::string lng_descendants_filename = index_path_prefix + "lng_descendants";
+      write_2d_vectors(lng_descendants_filename, _label_nav_graph->_lng_descendants);
+
       // save vector attr graph data
       std::string vector_attr_graph_filename = index_path_prefix + "vector_attr_graph";
       save_bipartite_graph(vector_attr_graph_filename);
 
       // print
-      std::cout << "- Index saved in " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start_time).count() << " ms" << std::endl;
+      std::cout << "- Index saved in " << std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count() << " ms" << std::endl;
    }
 
    void UniNavGraph::load(std::string index_path_prefix, const std::string &data_type)
@@ -1640,8 +1775,22 @@ namespace ANNS
       load_1d_vector(coverage_ratio_filename, _label_nav_graph->coverage_ratio);
       std::cout << "LNG coverage ratio loaded." << std::endl;
 
+      // fxy_add: load LNG descendants num
+      std::string lng_descendants_num_filename = index_path_prefix + "lng_descendants_num";
+      load_1d_pair_vector(lng_descendants_num_filename, _label_nav_graph->_lng_descendants_num);
+      std::cout << "LNG descendants num loaded." << std::endl;
+
+      // fxy_add: load LNG descendants
+      std::string lng_descendants_filename = index_path_prefix + "lng_descendants";
+      load_2d_vectors(lng_descendants_filename, _label_nav_graph->_lng_descendants);
+
+      // fxy_add: load covered_sets in LNG
+      std::string covered_sets_filename = index_path_prefix + "covered_sets";
+      load_2d_vectors(covered_sets_filename, _label_nav_graph->covered_sets);
+      std::cout << "LNG covered_sets loaded." << std::endl;
+
       // print
-      std::cout << "- Index loaded in " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start_time).count() << " ms" << std::endl;
+      std::cout << "- Index loaded in " << std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count() << " ms" << std::endl;
    }
 
    void UniNavGraph::statistics()
@@ -1672,7 +1821,8 @@ namespace ANNS
       _index_size /= 1024 * 1024;
    }
 
-   // fxy_add: 生成查询向量和标签
+   // ===================================begin：生成query task========================================
+   // fxy_add: 根据LNG中f点，生成查询向量和标签
    void UniNavGraph::query_generate(std::string &output_prefix, int n, float keep_prob, bool stratified_sampling, bool verify)
    {
       std::ofstream fvec_file(output_prefix + FVEC_EXT, std::ios::binary);
@@ -1814,7 +1964,7 @@ namespace ANNS
       std::cout << "TXT file: " << output_prefix + TXT_EXT << "\n";
    }
 
-   // fxy_add:生成多个查询任务
+   // fxy_add:根据LNG中f点，生成多个查询任务
    void UniNavGraph::generate_multiple_queries(
        std::string dataset,
        UniNavGraph &index,
@@ -1846,4 +1996,81 @@ namespace ANNS
       }
    }
 
+// fxy_add:根据幂集，生成多个查询任务
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <string>
+#include <random>
+
+   void UniNavGraph::generatePowerSetToFile(std::string &output_prefix, std::string dataset, int m)
+   {
+      // Step1: 生成query_label.txt
+      std::ofstream txt_File(output_prefix + "/" + dataset + "_query_labels.txt");
+
+      if (!txt_File.is_open())
+      {
+         std::cerr << "Failed to open file for writing query labels." << std::endl;
+         return;
+      }
+
+      // 总共有 2^(m+1) 个子集，去掉空集
+      int total = 1 << (m + 1); // 2^(m+1)
+
+      std::vector<std::vector<int>> all_subsets;
+
+      for (int mask = 1; mask < total; ++mask)
+      { // 从1开始，跳过空集
+         std::vector<int> subset;
+         for (int i = 0; i <= m; ++i)
+         {
+            if (mask & (1 << i))
+               subset.push_back(i);
+         }
+         all_subsets.push_back(subset);
+
+         // 输出格式如: 1,2,3
+         for (size_t i = 0; i < subset.size(); ++i)
+         {
+            txt_File << subset[i] + 1; // 修改为从1开始
+            if (i != subset.size() - 1)
+               txt_File << ",";
+         }
+         txt_File << std::endl;
+      }
+      txt_File.close();
+
+      // Step2: 生成query_fvecs.bin
+      std::ofstream fvec_file(output_prefix + "/" + dataset + "_query.fvecs", std::ios::binary);
+
+      if (!fvec_file.is_open())
+      {
+         std::cerr << "Failed to open file for writing query vectors." << std::endl;
+         return;
+      }
+
+      uint32_t dim = _base_storage->get_dim();
+
+      // 随机数生成器
+      std::random_device rd;
+      std::mt19937 gen(rd());
+      std::uniform_int_distribution<ANNS::IdxType> dis(1, _num_points - 1);
+
+      for (const auto &subset : all_subsets)
+      {
+         // 对于每个subset，随机选择一个向量ID
+         ANNS::IdxType vec_id = dis(gen);
+         const char *vec_data = _base_storage->get_vector(vec_id);
+
+         fvec_file.write((char *)&dim, sizeof(uint32_t));
+         fvec_file.write(vec_data, dim * sizeof(float));
+      }
+
+      fvec_file.close();
+
+      std::cout << "All non-empty subsets written to " << output_prefix + "/" + dataset + "_query_labels.txt" << std::endl;
+      std::cout << "All query vectors written to " << output_prefix + "/" + dataset + "_query.fvecs" << std::endl;
+   }
+
+   // ===================================end：生成query task========================================
 }

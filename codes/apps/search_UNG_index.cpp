@@ -10,6 +10,32 @@
 namespace po = boost::program_options;
 namespace fs = boost::filesystem;
 
+// 辅助函数：计算单个查询的recall
+float calculate_single_query_recall(const std::pair<ANNS::IdxType, float> *gt,
+                                    const std::pair<ANNS::IdxType, float> *results,
+                                    ANNS::IdxType K)
+{
+   std::unordered_set<ANNS::IdxType> gt_set;
+   for (int i = 0; i < K; ++i)
+   {
+      if (gt[i].first != -1)
+      {
+         gt_set.insert(gt[i].first);
+      }
+   }
+
+   int correct = 0;
+   for (int i = 0; i < K; ++i)
+   {
+      if (results[i].first != -1 && gt_set.count(results[i].first))
+      {
+         correct++;
+      }
+   }
+
+   return static_cast<float>(correct) / gt_set.size();
+}
+
 int main(int argc, char **argv)
 {
    std::string data_type, dist_fn, scenario;
@@ -17,7 +43,8 @@ int main(int argc, char **argv)
    ANNS::IdxType K, num_entry_points;
    std::vector<ANNS::IdxType> Lsearch_list;
    uint32_t num_threads;
-   bool ung_or_diskann = false; // true: ung, false: diskann
+   bool is_new_method = false; // true: use new method
+   bool is_ori_ung = false;    // true: use original ung
 
    try
    {
@@ -53,8 +80,10 @@ int main(int argc, char **argv)
                          "Number of entry points in each entry group");
       desc.add_options()("Lsearch", po::value<std::vector<ANNS::IdxType>>(&Lsearch_list)->multitoken()->required(),
                          "Number of candidates to search in the graph");
-      desc.add_options()("ung_or_diskann", po::value<bool>(&ung_or_diskann)->required(),
-                         "ung_or_diskann");
+      desc.add_options()("is_new_method", po::value<bool>(&is_new_method)->required(),
+                         "is_new_method");
+      desc.add_options()("is_ori_ung", po::value<bool>(&is_ori_ung)->required(),
+                         "is_ori_ung");
 
       po::variables_map vm;
       po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -110,46 +139,66 @@ int main(int argc, char **argv)
    std::cout << "Start querying ..." << std::endl;
    for (auto Lsearch : Lsearch_list)
    {
-      auto start_time = std::chrono::high_resolution_clock::now();
       std::vector<float> num_cmps(num_queries);
-      if (ung_or_diskann)
+      std::vector<ANNS::QueryStats> query_stats;
+      auto start_time = std::chrono::high_resolution_clock::now();
+      if (!is_new_method)
          index.search(query_storage, distance_handler, num_threads, Lsearch, num_entry_points, scenario, K, results, num_cmps, bitmap);
       else
-         index.search_hybrid(query_storage, distance_handler, num_threads, Lsearch, num_entry_points, scenario, K, results, num_cmps, bitmap);
-      auto time_cost = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start_time).count();
+         index.search_hybrid(query_storage, distance_handler, num_threads, Lsearch,
+                             num_entry_points, scenario, K, results, num_cmps, query_stats, bitmap, is_ori_ung);
+      // auto time_cost = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start_time).count();
+      auto time_cost = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count(); // 毫秒浮点
+
+      // 输出每个Lsearch下多个query task的详细统计信息
+      std::ofstream detail_out(result_path_prefix + "query_details_L" + std::to_string(Lsearch) + ".csv");
+      detail_out << "QueryID,Time(ms),DistanceCalcs,EntryPoints,LNGDescendants,entry_group_total_coverage,QPS,Recall,is_global_search\n";
+      for (int i = 0; i < num_queries; ++i)
+      {
+         float recall = calculate_single_query_recall(gt + i * K, results + i * K, K);
+         detail_out << i << ","
+                    << query_stats[i].time_ms << ","
+                    << query_stats[i].num_distance_calcs << ","
+                    << query_stats[i].num_entry_points << ","
+                    << query_stats[i].num_lng_descendants << ","
+                    << query_stats[i].entry_group_total_coverage << ","
+                    << 1000.0 / (query_stats[i].time_ms) << ","
+                    << recall << ","
+                    << query_stats[i].is_global_search << "\n";
+      }
 
       // statistics
       std::cout << "- Lsearch=" << Lsearch << ", time=" << time_cost << "ms" << std::endl;
       all_qpss.push_back(num_queries * 1000.0 / time_cost);
       all_cmps.push_back(std::accumulate(num_cmps.begin(), num_cmps.end(), 0) / num_queries);
       all_recalls.push_back(ANNS::calculate_recall(gt, results, num_queries, K));
-      float overall_recall = ANNS::calculate_recall_to_csv(gt, results, num_queries, K, result_path_prefix + "recall.csv");
 
-      // write to result file
-      std::ofstream out(result_path_prefix + "result_L" + std::to_string(Lsearch) + ".csv");
-      out << "GT,Result" << std::endl;
-      for (auto i = 0; i < num_queries; i++)
-      {
-         for (auto j = 0; j < K; j++)
-         {
-            out << gt[i * K + j].first << " ";
-         }
-         out << ",";
-         for (auto j = 0; j < K; j++)
-         {
-            out << results[i * K + j].first << " ";
-         }
-         out << std::endl;
-      }
+      // // write to result file
+      // float overall_recall = ANNS::calculate_recall_to_csv(gt, results, num_queries, K, result_path_prefix + "recall.csv");
+      // std::ofstream out(result_path_prefix + "result_L" + std::to_string(Lsearch) + ".csv");
+      // out << "GT,Result" << std::endl;
+      // for (auto i = 0; i < num_queries; i++)
+      // {
+      //    for (auto j = 0; j < K; j++)
+      //    {
+      //       out << gt[i * K + j].first << " ";
+      //    }
+      //    out << ",";
+      //    for (auto j = 0; j < K; j++)
+      //    {
+      //       out << results[i * K + j].first << " ";
+      //    }
+      //    out << std::endl;
+      // }
    }
 
-   // write to result file
-   fs::create_directories(result_path_prefix);
+   // fs::create_directories(result_path_prefix);
    std::ofstream out(result_path_prefix + "result.csv");
    out << "L,Cmps,QPS,Recall" << std::endl;
    for (auto i = 0; i < Lsearch_list.size(); i++)
       out << Lsearch_list[i] << "," << all_cmps[i] << "," << all_qpss[i] << "," << all_recalls[i] / 100 << std::endl;
    out.close();
+
    std::cout << "- all done" << std::endl;
    return 0;
 }

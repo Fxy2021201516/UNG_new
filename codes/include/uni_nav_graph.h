@@ -11,6 +11,16 @@
 
 namespace ANNS
 {
+   struct QueryStats
+   {
+      float recall;
+      double time_ms;
+      double entry_group_total_coverage;
+      size_t num_distance_calcs;
+      size_t num_entry_points;
+      size_t num_lng_descendants;
+      bool is_global_search;
+   };
    class UniNavGraph
    {
    public:
@@ -26,10 +36,15 @@ namespace ANNS
                   uint32_t num_threads, IdxType Lsearch, IdxType num_entry_points, std::string scenario,
                   IdxType K, std::pair<IdxType, float> *results, std::vector<float> &num_cmps,
                   std::vector<std::vector<bool>> &bitmap);
-      void search_hybrid(std::shared_ptr<IStorage> query_storage, std::shared_ptr<DistanceHandler> distance_handler,
-                         uint32_t num_threads, IdxType Lsearch, IdxType num_entry_points, std::string scenario,
-                         IdxType K, std::pair<IdxType, float> *results, std::vector<float> &num_cmps,
-                         std::vector<std::vector<bool>> &bitmap);
+      void search_hybrid(std::shared_ptr<IStorage> query_storage,
+                         std::shared_ptr<DistanceHandler> distance_handler,
+                         uint32_t num_threads, IdxType Lsearch,
+                         IdxType num_entry_points, std::string scenario,
+                         IdxType K, std::pair<IdxType, float> *results,
+                         std::vector<float> &num_cmps,
+                         std::vector<QueryStats> &query_stats,
+                         std::vector<std::vector<bool>> &bitmaps,
+                         bool is_ori_ung);
 
       // I/O
       void save(std::string index_path_prefix);
@@ -45,6 +60,7 @@ namespace ANNS
                                      float keep_prob,
                                      bool stratified_sampling,
                                      bool verify);
+      void generatePowerSetToFile(std::string &output_prefix, std::string dataset, int m);
       void load_bipartite_graph(const std::string &filename);
       bool compare_graphs(const ANNS::UniNavGraph &g1, const ANNS::UniNavGraph &g2);
       IdxType _num_points;
@@ -77,6 +93,9 @@ namespace ANNS
                               bool avoid_self = false, bool need_containment = true);
       void cal_f_coverage_ratio();
       void build_label_nav_graph();
+      size_t count_all_descendants(IdxType group_id) const;
+      void print_lng_descendants_num(const std::string &filename) const;
+      void get_descendants_info();
 
       // prepare vector storage for each group
       std::vector<IdxType> _new_to_old_vec_ids;
